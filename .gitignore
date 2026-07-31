@@ -1,0 +1,14 @@
+loot/
+__pycache__/
+*.pyc
+*.pyo
+*.vmem
+*.vmsn
+*.vmsn
+*.vmsd
+*.vmdk
+*.vmx
+work/
+*.mdb
+*.tar.gz
+.env

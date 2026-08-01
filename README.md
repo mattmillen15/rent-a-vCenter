@@ -21,7 +21,6 @@ options:
   -d DOMAIN             domain for SMB auth / SSO override
   --out DIR             output directory (default: ./loot)
   --timeout SECONDS     snapshot task timeout (default: 600)
-  -y                    non-interactive
   -v                    verbose
 ```
 

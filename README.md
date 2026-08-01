@@ -5,10 +5,10 @@ vCenter SAML golden ticket — forge an admin session from a stolen `data.mdb`, 
 ## Usage
 
 ```
-python3 rent-a-vcenter.py [TARGET] [--local-path PATH | -t HOST] [options]
+python3 rent-a-vcenter.py TARGET (--local-path PATH | -t HOST) [options]
 
 positional:
-  TARGET                vCenter IP or hostname (required to forge session and dump VMs)
+  TARGET                vCenter IP or hostname
 
 source (one required):
   --local-path PATH     data.mdb file, directory, or archive

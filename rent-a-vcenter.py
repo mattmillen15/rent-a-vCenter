@@ -879,7 +879,7 @@ def loginbytoken_soap(target: str, saml_assertion_xml: str, verbose=False):
             m = re.search(r'vmware_soap_session=([^;]+)', r.headers['Set-Cookie'])
             if m:
                 if verbose: print('[+] VIM SOAP session established')
-                return 'vmware_soap_session', m.group(1)
+                return 'vmware_soap_session', m.group(1).strip('"')
         if verbose:
             print(f'[v] LoginByToken response: {r.text[:600]}')
     except Exception as e:

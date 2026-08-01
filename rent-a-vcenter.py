@@ -2092,9 +2092,7 @@ def main():
 
             vmem = [f for f in files if f.suffix == '.vmem']
             if not vmem:
-                print(f'[-] vmem not downloaded — free up disk space in {output_dir} and retry')
-                for ev in sorted(output_dir.glob('*.vmem'), key=lambda p: p.stat().st_size, reverse=True):
-                    print(f'    {ev.name}  ({ev.stat().st_size >> 20} MB)')
+                print(f'[-] vmem not found for {vm_name} — snapshot may not include memory')
                 continue
 
             # Only remove the snapshot we created — never touch pre-existing ones

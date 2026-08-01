@@ -5,22 +5,22 @@ vCenter SAML golden ticket — forge an admin session from a stolen `data.mdb`, 
 ## Usage
 
 ```
-python3 rent-a-vcenter.py TARGET [--local-path PATH | --smb //HOST/SHARE] [options]
+python3 rent-a-vcenter.py TARGET [--local-path PATH | -t HOST] [options]
 
 positional:
   TARGET                vCenter IP or hostname
 
 source (one required):
   --local-path PATH     data.mdb file, directory, or archive
-  --smb //HOST/SHARE    SMB share to crawl for backup files
-  --smb-user USER
-  --smb-pass PASS
+  -t HOST               SMB target — bare host enumerates all shares,
+                        or full UNC path (\\host\share\path)
 
 options:
+  -u USER               username for SMB auth / SSO fallback
+  -p PASS               password for SMB auth / SSO fallback
+  -d DOMAIN             domain for SMB auth / SSO override
   --out DIR             output directory (default: ./loot)
   --timeout SECONDS     snapshot task timeout (default: 600)
-  -d DOMAIN             SSO domain (default: extracted from data.mdb)
-  -p PASS               vCenter admin password (optional fallback)
   -y                    non-interactive
   -v                    verbose
 ```

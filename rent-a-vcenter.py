@@ -905,6 +905,7 @@ _RETRIEVE_VMS_SOAP = '''\
           <pathSet>config.hardware.numCPU</pathSet>
           <pathSet>config.hardware.memoryMB</pathSet>
           <pathSet>config.files.vmPathName</pathSet>
+          <pathSet>snapshot.rootSnapshotList</pathSet>
         </propSet>
         <objectSet>
           <obj type="Folder">group-d1</obj>
@@ -929,6 +930,22 @@ _RETRIEVE_VMS_SOAP = '''\
     </RetrievePropertiesEx>
   </SOAP-ENV:Body>
 </SOAP-ENV:Envelope>'''
+
+
+def _walk_snap_tree(el, ns: dict, out: dict) -> None:
+    snap_id = el.findtext('v:id', namespaces=ns)
+    name    = el.findtext('v:name', namespaces=ns)
+    ct_str  = el.findtext('v:createTime', namespaces=ns)
+    if snap_id and name:
+        ct = None
+        if ct_str:
+            try:
+                ct = datetime.strptime(ct_str[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+        out[int(snap_id)] = {'name': name, 'create_time': ct}
+    for child in el.findall('v:childSnapshotList', ns):
+        _walk_snap_tree(child, ns, out)
 
 
 def soap_list_vms(target: str, vim_cookie: str, verbose=False) -> list:
@@ -959,86 +976,36 @@ def soap_list_vms(target: str, vim_cookie: str, verbose=False) -> list:
         ns   = {'v': _VIM_NS}
         for obj in root.findall('.//v:returnval/v:objects', ns):
             vm   = {'vm': '', 'name': '', 'power_state': '', 'numCPU': '',
-                    'memMB': '', 'vmPath': ''}
+                    'memMB': '', 'vmPath': '', 'snapshots': {}}
             ref = obj.find('v:obj', ns)
             if ref is not None:
                 vm['vm'] = ref.text or ''
             for prop in obj.findall('v:propSet', ns):
-                name = prop.findtext('v:name', default='', namespaces=ns)
-                val  = prop.findtext('v:val', default='', namespaces=ns)
-                if name == 'name':
+                pname = prop.findtext('v:name', default='', namespaces=ns)
+                val   = prop.findtext('v:val', default='', namespaces=ns)
+                if pname == 'name':
                     vm['name'] = val
-                elif name == 'runtime.powerState':
+                elif pname == 'runtime.powerState':
                     vm['power_state'] = val
-                elif name == 'config.hardware.numCPU':
+                elif pname == 'config.hardware.numCPU':
                     vm['numCPU'] = val
-                elif name == 'config.hardware.memoryMB':
+                elif pname == 'config.hardware.memoryMB':
                     vm['memMB'] = val
-                elif name == 'config.files.vmPathName':
+                elif pname == 'config.files.vmPathName':
                     vm['vmPath'] = val
+                elif pname == 'snapshot.rootSnapshotList':
+                    snaps  = {}
+                    val_el = prop.find('v:val', ns)
+                    if val_el is not None:
+                        for tree in val_el.findall('v:VirtualMachineSnapshotTree', ns):
+                            _walk_snap_tree(tree, ns, snaps)
+                    vm['snapshots'] = snaps
             vms.append(vm)
         return vms
     except Exception as e:
         if verbose:
             print(f'[v] SOAP VM list error: {e}')
         return []
-
-
-# ─── SOAP snapshot info ─────────────────────────────────────────────────────────
-
-def soap_snapshot_info(target: str, vim_cookie: str, vm_moref: str) -> dict:
-    """Return {snap_id → {name, create_time}} via SOAP PropertyCollector."""
-    import requests as req
-    req.packages.urllib3.disable_warnings()
-    etree = _need('lxml.etree', 'lxml')
-    body = (
-        '<?xml version="1.0" encoding="UTF-8"?>'
-        '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/">'
-        '<SOAP-ENV:Body>'
-        '<RetrievePropertiesEx xmlns="urn:vim25">'
-        '<_this type="PropertyCollector">propertyCollector</_this>'
-        '<specSet>'
-        '<propSet><type>VirtualMachine</type>'
-        '<pathSet>snapshot.rootSnapshotList</pathSet></propSet>'
-        f'<objectSet><obj type="VirtualMachine">{vm_moref}</obj><skip>false</skip></objectSet>'
-        '</specSet>'
-        '<options/>'
-        '</RetrievePropertiesEx>'
-        '</SOAP-ENV:Body>'
-        '</SOAP-ENV:Envelope>'
-    )
-    try:
-        r = req.post(f'https://{target}/sdk', data=body.encode(),
-                     headers={'Content-Type': 'text/xml; charset=UTF-8',
-                              'SOAPAction': 'urn:vim25/8.0.3.0',
-                              'Cookie': f'vmware_soap_session={vim_cookie}'},
-                     verify=False, timeout=15)
-        if r.status_code != 200:
-            return {}
-        root = etree.fromstring(r.content)
-        ns = {'v': 'urn:vim25'}
-        out = {}
-
-        def _walk(el):
-            snap_id = el.findtext('v:id', namespaces=ns)
-            name    = el.findtext('v:name', namespaces=ns)
-            ct_str  = el.findtext('v:createTime', namespaces=ns)
-            if snap_id and name:
-                ct = None
-                if ct_str:
-                    try:
-                        ct = datetime.strptime(ct_str[:19], '%Y-%m-%dT%H:%M:%S').replace(tzinfo=timezone.utc)
-                    except ValueError:
-                        pass
-                out[int(snap_id)] = {'name': name, 'create_time': ct}
-            for child in el.findall('v:childSnapshotList', ns):
-                _walk(child)
-
-        for entry in root.findall('.//v:val', ns):
-            _walk(entry)
-        return out
-    except Exception:
-        return {}
 
 
 # ─── SOAP snapshot creation ─────────────────────────────────────────────────────
@@ -1813,13 +1780,9 @@ def _parse_vmsd(text: str) -> list:
 
 
 def _discover_existing_snapshots(vc: 'VCenterSession', vm_name: str,
-                                  vm_id: str = '', verbose: bool = False) -> list:
-    """
-    Return existing snapshot entries [{stem, name, create_time}] sorted oldest→newest.
-
-    Primary method: directory listing (same path _download_memory_files uses).
-    Enrichment: .vmsd provides display names and creation timestamps if reachable.
-    """
+                                  snap_info: dict = None,
+                                  verbose: bool = False) -> list:
+    """Return existing snapshot entries [{stem, name, create_time}] sorted oldest→newest."""
     ds_names = []
     for path in ['/api/vcenter/datastore', '/rest/vcenter/datastore']:
         r = vc.get(path)
@@ -1868,11 +1831,9 @@ def _discover_existing_snapshots(vc: 'VCenterSession', vm_name: str,
               f'across {len(by_num)} snapshot(s)')
 
     # Enrich with snapshot names + creation times
-    # Primary: SOAP PropertyCollector (reliable across all vSphere versions)
-    # Fallback: vmsd parsing (used when no VIM session)
-    soap_info: dict = {}
-    if vc._vim_cookie and vm_id:
-        soap_info = soap_snapshot_info(vc.target, vc._vim_cookie, vm_id)
+    # Primary: snap_info from soap_list_vms traversal (reliable ISO8601 timestamps)
+    # Fallback: vmsd parsing (broken timestamps on vSphere 8.x, used when no VIM session)
+    soap_info: dict = snap_info or {}
 
     vmsd_by_stem: dict = {}
     if not soap_info:
@@ -2102,7 +2063,9 @@ def main():
             vm_id   = vm.get('vm', '')
             vm_name = vm.get('name', vm_id)
 
-            vmsd_snaps = _discover_existing_snapshots(vc, vm_name, vm_id=vm_id, verbose=args.verbose)
+            vmsd_snaps = _discover_existing_snapshots(vc, vm_name,
+                                                       snap_info=vm.get('snapshots', {}),
+                                                       verbose=args.verbose)
             snap_choice, snap_entry = _select_snapshot_menu(vmsd_snaps, vm_name)
 
             target_files = None
@@ -2134,9 +2097,10 @@ def main():
                     print(f'    {ev.name}  ({ev.stat().st_size >> 20} MB)')
                 continue
 
-            # Only remove snapshots once vmem is confirmed on disk
-            soap_remove_all_snapshots(target, vc._vim_cookie, vm_id,
-                                      verbose=args.verbose)
+            # Only remove the snapshot we created — never touch pre-existing ones
+            if snap_choice == 'new' and vc._vim_cookie:
+                soap_remove_all_snapshots(target, vc._vim_cookie, vm_id,
+                                          verbose=args.verbose)
 
             _extract_creds(vmem[0], output_dir)
 

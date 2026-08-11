@@ -2090,6 +2090,12 @@ def main():
                 else:
                     print('    [!] Snapshot creation failed — trying existing memory files')
 
+            if not (shutil.which('vmkatz') or shutil.which('vol')
+                    or shutil.which('vol3') or shutil.which('volatility3')):
+                print('[!] vmkatz not found — run install.sh to build it')
+                print('[!] Skipping download (no credential extractor available)')
+                continue
+
             files = _download_memory_files(vc, vm_name, vm.get('vmPath', ''),
                                            output_dir, args.verbose,
                                            target_names=target_files)

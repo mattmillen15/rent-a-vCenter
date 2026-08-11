@@ -2055,7 +2055,7 @@ def main():
                 '    method: "POST", mode: "no-cors", credentials: "include",',
                 '    headers: {"Content-Type": "application/x-www-form-urlencoded"},',
                 '    body: p.toString()',
-                '  }}).catch(function(){});',
+                '  }).catch(function(){});',
                 f'  window.location.replace({json.dumps(ui_url)});',
                 '})();',
                 '</script>',

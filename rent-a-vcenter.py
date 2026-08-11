@@ -2040,12 +2040,21 @@ def main():
             import tempfile
             saml_b64 = base64.b64encode(signed).decode()
             html = (
-                '<!DOCTYPE html><html><body onload="document.forms[0].submit()">\n'
-                f'<form method="POST" action="https://{target}/ui/saml/websso/sso">\n'
+                '<!DOCTYPE html><html><head></head><body>\n'
+                '<p>Logging in to vCenter...</p>\n'
+                '<iframe name="saml" style="display:none"></iframe>\n'
+                f'<form id="f" method="POST" action="https://{target}/ui/saml/websso/sso" target="saml">\n'
                 f'  <input type="hidden" name="SAMLResponse" value="{saml_b64}"/>\n'
                 f'  <input type="hidden" name="RelayState" value="{relay_state}"/>\n'
-                '  <noscript><input type="submit" value="Login"/></noscript>\n'
-                '</form></body></html>'
+                '</form>\n'
+                '<script>\n'
+                'var iframe = document.querySelector("iframe");\n'
+                'var ready = false;\n'
+                f'iframe.onload = function() {{ if (ready) window.location.href = "https://{target}/ui/"; }};\n'
+                'ready = true;\n'
+                'document.getElementById("f").submit();\n'
+                '</script>\n'
+                '</body></html>'
             )
             out = Path(tempfile.gettempdir()) / 'vcenter_saml_login.html'
             out.write_text(html)

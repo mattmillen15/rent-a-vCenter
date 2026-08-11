@@ -1637,9 +1637,17 @@ def _extract_creds(vmem_path: Path, output_dir: Path):
     stem    = vmem_path.stem
     outfile = output_dir / f'{stem}_creds.txt'
 
-    # Prefer .vmsn alone — ESXi embeds memory in the .vmsn; vmkatz auto-finds .vmem
+    # Pass .vmem to vmkatz — it auto-discovers the .vmsn companion in the same dir.
+    # Fall back to .vmsn only when .vmem is missing (disk-only snapshot edge case).
     vmsn_path = vmem_path.with_suffix('.vmsn')
-    input_files = [str(vmsn_path)] if vmsn_path.exists() else [str(vmem_path)]
+    if vmem_path.exists():
+        input_files = [str(vmem_path)]
+    elif vmsn_path.exists():
+        print('    [!] .vmem not found — trying .vmsn (disk-only snapshot may yield no creds)')
+        input_files = [str(vmsn_path)]
+    else:
+        print('    [!] Neither .vmem nor .vmsn found — skipping')
+        return
 
     vmkatz_bin = shutil.which('vmkatz')
     if vmkatz_bin:

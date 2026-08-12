@@ -1,6 +1,5 @@
 loot/
 __pycache__/
-vcenter-patch-confirmation.py
 *.pyc
 *.pyo
 *.vmem

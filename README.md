@@ -22,19 +22,15 @@ options:
   -v                    verbose
 ```
 
-## Requirements
-
-```
-pip install -r requirements.txt
-```
-
-Credential extraction requires [vmkatz](https://github.com/nikaiw/VMkatz):
+## Setup
 
 ```bash
-git clone https://github.com/nikaiw/VMkatz && cd VMkatz
-cargo build --release
-cp target/release/vmkatz ~/.local/bin/
+./install.sh
 ```
+
+Installs Python dependencies, builds [vmkatz](https://github.com/nikaiw/VMkatz) from source, and drops a `rent-a-vcenter` launcher into `~/.local/bin` so you can run it from anywhere.
+
+Requires Python 3.8+ and Rust/cargo (installer will pull Rust via rustup if missing).
 
 ## Notes
 
